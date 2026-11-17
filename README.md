@@ -104,7 +104,8 @@ Expected SHA-256 of `submissions/Montreal.csv`:
 914142a03e86cfb9d074245255e04c852626a24e1bb357425760c849077c52ae
 ```
 
-To check that the file regenerates byte for byte (two fresh runs, compared by SHA-256), and the same\nwith an empty cache folder for each run (`--cold`):
+To check that the file regenerates byte for byte (two fresh runs, compared by SHA-256), and the same
+with an empty cache folder for each run (`--cold`):
 
 ```powershell
 .venv\Scripts\python scripts\check_reproducible.py
