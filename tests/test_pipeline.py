@@ -85,14 +85,31 @@ def test_static_players_no_ball_is_dead():
     assert (codes == 2).mean() > 0.8
 
 
-def test_predict_codes_adds_prior():
+def test_predict_codes_applies_goal_term_to_dead(monkeypatch):
+    import montreal.pipeline as pl
+
     trk = _moving_match()
     F = compute_features(trk)
-    prior = np.zeros((len(F), 3))
-    prior[:, 2] = 100.0  # overwhelming dead prior
-    codes = predict_codes(trk, F, HEURISTIC, prior=prior)
+    n = len(F)
+    tags = {"votes": {}, "weights": {}, "goal_mask": np.ones(n, dtype=bool)}
+    orig = pl.apply_tag_prior
+    monkeypatch.setattr(pl, "apply_tag_prior",
+                        lambda lp, v, w, g, **k: orig(lp, v, w, g, w_goal=100.0))
+    codes = predict_codes(trk, F, HEURISTIC, tags=tags)
     assert (codes[:600] == 2).all() and (codes[600:700] == 3).all()
 
+
+def test_votes_alone_leave_dead_frames_unchanged_in_a_clear_match():
+    """With no goal mask the votes only move H against A; here D frames are the same."""
+    trk = _moving_match()
+    F = compute_features(trk)
+    n = len(F)
+    base = predict_codes(trk, F, HEURISTIC)
+    votes = {k: np.ones(n, dtype=np.int8) for k in ("attack", "setpiece")}
+    tags = {"votes": votes, "weights": {"attack": 1.0, "setpiece": 1.0},
+            "goal_mask": np.zeros(n, dtype=bool)}
+    with_tags = predict_codes(trk, F, HEURISTIC, tags=tags)
+    np.testing.assert_array_equal(base == 2, with_tags == 2)
 
 def test_emission_logp_softmax_dict_and_name_check():
     rng = np.random.default_rng(0)

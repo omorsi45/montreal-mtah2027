@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from montreal.tagging import (calibrate, confident_team, goal_dead, load_tags, tag_prior,
+from montreal.tagging import (apply_tag_prior, calibrate, confident_team, goal_dead, load_tags,
                               tag_votes)
 
 NAMES = ["ball_vis", "d_home", "d_away"]
@@ -121,10 +121,73 @@ def test_confident_requires_ball_visible_and_separation():
     assert not confident_team(F, NAMES).any()
 
 
-def test_tag_prior():
-    votes = {"attack": np.array([1, -1, 0, 1], dtype=np.int8),
-             "defend": np.array([1, 0, 0, -1], dtype=np.int8)}
-    goal = np.array([False, False, True, True])
-    p = tag_prior(votes, goal, {"attack": 0.5, "defend": 0.25}, w_goal=1.0)
-    assert p.dtype == np.float64 and p.shape == (4, 3)
-    np.testing.assert_allclose(p, [[0.75, 0, 0], [0, 0.5, 0], [0, 0, 1.0], [0.5, 0.25, 1.0]])
+def _rand_logp(n, seed=0):
+    rng = np.random.default_rng(seed)
+    z = rng.normal(0, 2.0, size=(n, 3))
+    return z - np.logaddexp.reduce(z, axis=1, keepdims=True)
+
+
+def _vote_args(n, seed=1):
+    rng = np.random.default_rng(seed)
+    votes = {k: rng.integers(-1, 2, size=n).astype(np.int8) for k in ("attack", "defend", "setpiece")}
+    weights = {"attack": 1.0, "defend": 0.7, "setpiece": 0.566}
+    goal = rng.random(n) < 0.2
+    return votes, weights, goal
+
+
+def test_apply_tag_prior_keeps_dead_score_and_alive_mass():
+    n = 500
+    logp = _rand_logp(n)
+    votes, weights, goal = _vote_args(n)
+    out = apply_tag_prior(logp, votes, weights, np.zeros(n, dtype=bool))
+    assert out.shape == (n, 3) and out.dtype == np.float64
+    np.testing.assert_array_equal(out[:, 2], logp[:, 2])  # D is untouched by any vote
+    np.testing.assert_allclose(np.logaddexp(out[:, 0], out[:, 1]),
+                               np.logaddexp(logp[:, 0], logp[:, 1]), atol=1e-12, rtol=0)
+    # the input is not mutated
+    assert not np.shares_memory(out, logp)
+
+
+def test_apply_tag_prior_net_vote_shifts_h_minus_a_and_caps_at_one():
+    logp = _rand_logp(6, seed=3)
+    z0 = logp[:, 0] - logp[:, 1]
+    votes = {"attack": np.array([1, 1, -1, 0, 1, -1], dtype=np.int8),
+             "defend": np.array([0, 1, -1, 0, 1, 1], dtype=np.int8),
+             "setpiece": np.array([0, 0, 0, 0, 1, -1], dtype=np.int8)}
+    weights = {"attack": 0.5, "defend": 0.25, "setpiece": 0.4}
+    out = apply_tag_prior(logp, votes, weights, np.zeros(6, dtype=bool))
+    shift = (out[:, 0] - out[:, 1]) - z0
+    # +0.5; 0.75; -0.75; 0; 0.5+0.25+0.4 = 1.15 -> capped 1.0; 0.5-... = -0.5+0.25-0.4 = -0.65
+    np.testing.assert_allclose(shift, [0.5, 0.75, -0.75, 0.0, 1.0, -0.65], atol=1e-12)
+    # +1 vote raises H - A by exactly min(w * vote, 1)
+    one = apply_tag_prior(logp, {"attack": np.ones(6, dtype=np.int8)}, {"attack": 0.3},
+                          np.zeros(6, dtype=bool))
+    np.testing.assert_allclose((one[:, 0] - one[:, 1]) - z0, 0.3, atol=1e-12)
+    cap = apply_tag_prior(logp, {"attack": np.ones(6, dtype=np.int8)}, {"attack": 2.5},
+                          np.zeros(6, dtype=bool))
+    np.testing.assert_allclose((cap[:, 0] - cap[:, 1]) - z0, 1.0, atol=1e-12)
+    capped_down = apply_tag_prior(logp, {"attack": -np.ones(6, dtype=np.int8)}, {"attack": 2.5},
+                                  np.zeros(6, dtype=bool), v_cap=0.5)
+    np.testing.assert_allclose((capped_down[:, 0] - capped_down[:, 1]) - z0, -0.5, atol=1e-12)
+
+
+def test_apply_tag_prior_goal_mask_adds_to_d_only():
+    logp = _rand_logp(4, seed=5)
+    goal = np.array([False, True, False, True])
+    out = apply_tag_prior(logp, {}, {}, goal, w_goal=1.5)
+    np.testing.assert_allclose(out[:, 2], logp[:, 2] + 1.5 * goal, atol=1e-12)
+    np.testing.assert_allclose(out[:, :2], logp[:, :2], atol=1e-12)
+
+
+def test_apply_tag_prior_zero_votes_is_identity_and_stable_for_extreme_logits():
+    logp = _rand_logp(50, seed=7)
+    votes, weights, goal = _vote_args(50)
+    zero = {k: np.zeros(50, dtype=np.int8) for k in votes}
+    np.testing.assert_allclose(apply_tag_prior(logp, zero, weights, np.zeros(50, dtype=bool)),
+                               logp, atol=1e-12)
+    ext = np.array([[-800.0, -1.0, -2.0], [-1.0, -900.0, -3.0], [-0.5, -0.6, -1000.0]])
+    out = apply_tag_prior(ext, {"attack": np.array([1, -1, 1], dtype=np.int8)}, {"attack": 1.0},
+                          np.zeros(3, dtype=bool))
+    assert np.isfinite(out).all()
+    np.testing.assert_allclose(np.logaddexp(out[:, 0], out[:, 1]),
+                               np.logaddexp(ext[:, 0], ext[:, 1]), atol=1e-9)

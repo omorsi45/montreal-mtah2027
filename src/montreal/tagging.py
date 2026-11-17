@@ -1,9 +1,9 @@
-"""Smart Tagging (SportsCode XML) as a capped, calibrated additive log-prior over H/A/D.
+"""Smart Tagging (SportsCode XML) as a capped, calibrated team-only adjustment of the log-scores.
 
 Smart Tagging is Metrica's automatic annotation of tactical phases and set pieces. It is *not*
 ground truth. Each tag family is weighted by how often its team vote agrees with confident
 tracking evidence (ball visible, one team's nearest player at the ball and the other far away) --
-never by agreement with any label. Weights are capped, so the tags can only nudge the decoder.
+never by agreement with any label. Weights are capped, and the net vote is capped too, so the\ntags can only nudge H against A; they never move a frame between alive and dead (except the\nadditive goal-dead term).
 
 Codes H=0, A=1, D=2.
 """
@@ -163,14 +163,38 @@ def calibrate(votes: dict[str, np.ndarray], confident: np.ndarray) -> dict[str, 
     return weights
 
 
-def tag_prior(votes: dict[str, np.ndarray], goal_mask: np.ndarray,
-              weights: dict[str, float], w_goal: float = 1.0) -> np.ndarray:
-    """Additive log-prior (n, 3) over H/A/D from the weighted votes and the goal-dead mask."""
-    n = len(goal_mask)
-    prior = np.zeros((n, 3), dtype=np.float64)
+def _log_sigmoid(x: np.ndarray) -> np.ndarray:
+    """log(1 / (1 + exp(-x))), stable for any x."""
+    return -np.logaddexp(0.0, -x)
+
+
+def apply_tag_prior(logp: np.ndarray, votes: dict[str, np.ndarray], weights: dict[str, float],
+                    goal_mask: np.ndarray, w_goal: float = 1.0, v_cap: float = 1.0) -> np.ndarray:
+    """Team-only Smart Tagging adjustment of the (n, 3) log-probabilities over H/A/D.
+
+    The calibrated weights only measure H-versus-A agreement (on frames where play is alive), so
+    the votes may only move H against A. Each frame keeps its alive mass ``logaddexp(H, A)`` and
+    its D score. With ``z = H - A``, ``alive = logaddexp(H, A)`` and the net signed vote
+    ``v = clip(sum_f w_f * vote_f, -v_cap, v_cap)``::
+
+        H' = alive + log sigmoid(z + v)      A' = alive + log sigmoid(-(z + v))      D' = D
+
+    so ``H' - A' = z + v`` and ``logaddexp(H', A') = alive``. Attack and defend tags describe the
+    same phase from both sides, hence the cap on the *net* vote. Set-piece votes therefore only say
+    which team holds the ball once play is alive; they cannot pull a stoppage towards alive. The goal
+    mask adds ``w_goal`` to the D column (additive, as before). The input is not modified.
+    """
+    logp = np.asarray(logp, dtype=np.float64)
+    n = len(logp)
+    v = np.zeros(n, dtype=np.float64)
     for family, vote in votes.items():
-        w = float(weights.get(family, 0.0))
-        prior[vote == 1, 0] += w
-        prior[vote == -1, 1] += w
-    prior[np.asarray(goal_mask, dtype=bool), 2] += w_goal
-    return prior
+        v += float(weights.get(family, 0.0)) * np.asarray(vote, dtype=np.float64)
+    v = np.clip(v, -float(v_cap), float(v_cap))
+
+    z = logp[:, 0] - logp[:, 1]
+    alive = np.logaddexp(logp[:, 0], logp[:, 1])
+    out = logp.copy()
+    out[:, 0] = alive + _log_sigmoid(z + v)
+    out[:, 1] = alive + _log_sigmoid(-(z + v))
+    out[:, 2] = logp[:, 2] + float(w_goal) * np.asarray(goal_mask, dtype=bool)
+    return out
