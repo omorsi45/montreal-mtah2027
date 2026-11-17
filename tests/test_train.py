@@ -9,6 +9,7 @@ from montreal import train
 from montreal.tracking import Tracking
 
 PERIODS = [(0, 4000), (5000, 9500)]
+BALL_LENGTHS = np.array([50, 120, 300, 800, 1500], dtype=np.int64)  # synthetic, like external gaps
 
 
 def _trk(n=10_000, slots=6, periods=PERIODS) -> Tracking:
@@ -34,7 +35,7 @@ def test_simulate_dropout_share_and_determinism():
     ball_before = trk.ball.copy()
     players_before = trk.players.copy()
 
-    out = train.simulate_dropout(trk, np.random.default_rng(7))
+    out = train.simulate_dropout(trk, np.random.default_rng(7), BALL_LENGTHS)
     miss = np.isnan(out.ball[:, 0])
     share = miss[inside].mean()
     assert 0.25 <= share <= 0.30
@@ -45,10 +46,10 @@ def test_simulate_dropout_share_and_determinism():
     assert (pshare >= 0.05).all() and (pshare <= 0.07).all()
 
     # same seed -> same mask; input not mutated
-    again = train.simulate_dropout(trk, np.random.default_rng(7))
+    again = train.simulate_dropout(trk, np.random.default_rng(7), BALL_LENGTHS)
     assert np.array_equal(np.isnan(out.ball), np.isnan(again.ball))
     assert np.array_equal(np.isnan(out.players), np.isnan(again.players))
-    other = train.simulate_dropout(trk, np.random.default_rng(8))
+    other = train.simulate_dropout(trk, np.random.default_rng(8), BALL_LENGTHS)
     assert not np.array_equal(np.isnan(out.ball), np.isnan(other.ball))
     assert np.array_equal(trk.ball, ball_before) and np.array_equal(trk.players, players_before)
     assert out.ball is not trk.ball and out.players is not trk.players
@@ -63,7 +64,7 @@ def test_simulate_dropout_adds_on_top_of_existing_gaps():
     trk = Tracking(ball=ball, players=trk.players, team=trk.team, periods=trk.periods,
                    pitch=trk.pitch)
     before = np.isnan(trk.ball[:, 0])
-    out = train.simulate_dropout(trk, np.random.default_rng(3))
+    out = train.simulate_dropout(trk, np.random.default_rng(3), BALL_LENGTHS)
     after = np.isnan(out.ball[:, 0])
     newly = after & ~before
     assert newly[inside].sum() >= 0.25 * inside.sum() - 1  # per-period ceil
@@ -129,7 +130,7 @@ def test_num_keeps_fractional_costs():
 def test_logo_runs_on_tiny_synthetic_games(monkeypatch):
     monkeypatch.setattr(train, "COST_GRID", [(20.0, 10.0, 10.0), (40.0, 5.0, 5.0)])
     games = [_synthetic_game(k) for k in range(3)]
-    table = train.logo(games)
+    table = train.logo(games, ball_lengths=BALL_LENGTHS)
     assert len(table) == len(train.CANDIDATES) * 2
     expected = {"candidate", "swap", "dead", "live", "spell_f1_g1", "spell_f1_g2", "spell_f1_g3",
                 "spell_f1_mean", "macro_f1_mean"}
@@ -137,7 +138,7 @@ def test_logo_runs_on_tiny_synthetic_games(monkeypatch):
     num = table[["spell_f1_g1", "spell_f1_g2", "spell_f1_g3", "spell_f1_mean", "macro_f1_mean"]]
     assert np.isfinite(num.to_numpy()).all()
     assert list(table["candidate"].unique()) == [c.name for c in train.CANDIDATES]
-    again = train.logo(games)
+    again = train.logo(games, ball_lengths=BALL_LENGTHS)
     pd.testing.assert_frame_equal(table, again)  # deterministic
 
 
@@ -161,14 +162,15 @@ def test_logo_feature_names_select_the_columns_a_model_sees(monkeypatch):
     monkeypatch.setattr(train, "COST_GRID", [(20.0, 10.0, 10.0)])
     monkeypatch.setattr(train, "CANDIDATES", train.CANDIDATES[:3])  # heuristic + 2 softmax
     games = [_synthetic_game(k) for k in range(3)]
-    t_all = train.logo(games)
-    t_v1 = train.logo(games, feature_names=train.FEATURE_SETS["v1"])
+    t_all = train.logo(games, ball_lengths=BALL_LENGTHS)
+    t_v1 = train.logo(games, feature_names=train.FEATURE_SETS["v1"], ball_lengths=BALL_LENGTHS)
     assert list(t_all["candidate"]) == list(t_v1["candidate"])
     # the heuristic reads v1 columns only, so the feature set cannot change it
     pd.testing.assert_frame_equal(t_all.iloc[[0]].reset_index(drop=True),
                                   t_v1.iloc[[0]].reset_index(drop=True))
     assert np.isfinite(t_v1[["spell_f1_mean", "macro_f1_mean"]].to_numpy()).all()
-    pd.testing.assert_frame_equal(t_v1, train.logo(games, feature_names=train.FEATURE_SETS["v1"]))
+    pd.testing.assert_frame_equal(t_v1, train.logo(games, feature_names=train.FEATURE_SETS["v1"],
+                                                         ball_lengths=BALL_LENGTHS))
 
 
 def _best(spell, macro=0.5, name="softmax(l2=0.1,cw=none)"):
@@ -182,3 +184,40 @@ def test_choose_feature_set_keeps_v2_only_if_strictly_better():
     assert train.choose_feature_set({"v1": _best(0.45), "v2": _best(0.40)})[0] == "v1"
     name, text = train.choose_feature_set({"v1": _best(0.45), "v2": _best(0.46)})
     assert "v2" in text and "0.4600" in text and "0.4500" in text
+
+
+def test_external_gap_lengths_counts_missing_ball_runs_inside_periods_only():
+    n = 3000
+    ball = np.random.default_rng(0).uniform(5, 95, size=(n, 2))
+    ball[100:149] = np.nan  # 49 rows: too short
+    ball[200:250] = np.nan  # exactly 50: kept
+    ball[1000:1400] = np.nan  # 400 rows: kept
+    ball[1900:2100] = np.nan  # crosses the period end at 2000: only 100 rows count
+    ball[2500:2700] = np.nan  # between periods: ignored
+    players = np.zeros((n, 2, 2))
+    trk1 = Tracking(ball=ball, players=players, team=np.array([0, 1], dtype=np.int8),
+                    periods=[(0, 2000), (2900, 3000)], pitch=(105.0, 68.0))
+    ball2 = np.random.default_rng(1).uniform(5, 95, size=(n, 2))
+    ball2[10:70] = np.nan  # 60 rows
+    trk2 = Tracking(ball=ball2, players=players, team=np.array([0, 1], dtype=np.int8),
+                    periods=[(0, 1000)], pitch=(105.0, 68.0))
+    out = train.external_gap_lengths([trk1, trk2])
+    assert out.dtype == np.int64
+    assert out.tolist() == [50, 60, 100, 400]  # sorted, pooled over games
+    assert train.external_gap_lengths([]).tolist() == []
+
+
+def test_simulate_dropout_draws_block_lengths_from_the_given_lengths():
+    trk = _trk()
+    out = train.simulate_dropout(trk, np.random.default_rng(5), np.array([200], dtype=np.int64))
+    miss = np.isnan(out.ball[:, 0])
+    inside = _in_period(len(miss), trk.periods)
+    runs = np.diff(np.flatnonzero(np.diff(np.concatenate(([0], miss.astype(np.int8), [0])))))[::2]
+    assert (runs % 200 == 0).sum() >= len(runs) - 4  # blocks of 200 (merged/truncated at the edges)
+    assert 0.25 <= miss[inside].mean() <= 0.30
+
+
+def test_gap_tag_changes_with_the_lengths():
+    a = train._gap_tag(np.array([50, 100], dtype=np.int64))
+    assert a == train._gap_tag(np.array([50, 100], dtype=np.int64))
+    assert a != train._gap_tag(np.array([50, 101], dtype=np.int64))

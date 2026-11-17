@@ -5,7 +5,8 @@ CLI: ``python -m montreal.train [--params models/params.json] [--workers N]``.
 Every choice (emission model, switch costs) is made on the three public sample games only; the
 competition match and its ground truth are never touched here. Each fold fits on two games and
 scores on the third, with ball/player dropout simulated on both sides so the models learn on
-tracking that looks like the competition's (long gaps, label-independent).
+tracking with realistic long gaps (label-independent). The ball-gap lengths are resampled from the
+public sample games' own missing-ball runs (external_gap_lengths), never from the competition match.
 """
 
 from __future__ import annotations
@@ -30,10 +31,11 @@ from montreal.metrics import score
 from montreal.tracking import Tracking
 
 SEED = 20261117
+# Design constants, set a priori and not tuned on any data:
 BALL_SHARE = 0.25  # newly masked ball rows, as a share of each period's rows
 PLAYER_SHARE = 0.05  # newly masked rows per player slot, as a share of each period's rows
-BALL_BLOCK = (50, 1500)  # log-uniform block length (rows)
 PLAYER_BLOCK = (25, 250)  # uniform block length (rows)
+MIN_GAP = 50  # shortest external missing-ball run (rows) that counts as a gap to resample
 TRAIN_STRIDE = 5  # train on every 5th row
 _MAX_BLOCKS = 20_000  # safety valve against pathological (almost fully missing) inputs
 
@@ -88,17 +90,45 @@ def _mask_blocks(visible: np.ndarray, target: int, draw_len, rng) -> np.ndarray:
     return masked
 
 
-def simulate_dropout(trk: Tracking, rng) -> Tracking:
+def external_gap_lengths(trks: list[Tracking]) -> np.ndarray:
+    """Lengths (rows, int64, sorted) of every missing-ball run of at least ``MIN_GAP`` rows inside
+    the periods of the given (clean, public sample) games, pooled over the games."""
+    out: list[int] = []
+    for trk in trks:
+        n = len(trk.ball)
+        for a, b in trk.periods:
+            a, b = max(int(a), 0), min(int(b), n)
+            if b <= a:
+                continue
+            miss = np.isnan(trk.ball[a:b, 0]).astype(np.int8)
+            d = np.diff(np.concatenate(([0], miss, [0])))
+            out.extend(int(e - s) for s, e in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1))
+                       if e - s >= MIN_GAP)
+    return np.sort(np.asarray(out, dtype=np.int64))
+
+
+def _gap_tag(ball_lengths) -> str:
+    """Short digest of the gap lengths plus the code version; part of every dropout cache key."""
+    h = hashlib.sha256()
+    h.update(np.asarray(ball_lengths, dtype=np.int64).tobytes())
+    h.update(_code_version().encode())
+    return h.hexdigest()[:12]
+
+
+def simulate_dropout(trk: Tracking, rng, ball_lengths) -> Tracking:
     """Copy of `trk` with extra label-independent gaps (inputs are never mutated).
 
-    Ball: inside each period, blocks of ``int(exp(U(log 50, log 1500)))`` rows at uniform starts
-    until the *newly* hidden rows cover 25% of the period's rows. Players: per slot, blocks of
-    ``int(U(25, 250))`` rows until 5% of the period's rows are newly hidden.
+    Ball: inside each period, blocks at uniform starts until the *newly* hidden rows cover 25% of
+    the period's rows; each block length is drawn uniformly from the array `ball_lengths` (the
+    public sample games' own gap lengths). Players: per slot, blocks of ``int(U(25, 250))`` rows
+    until 5% of the period's rows are newly hidden.
     """
+    ball_lengths = np.asarray(ball_lengths, dtype=np.int64)
+    if ball_lengths.size == 0:
+        raise ValueError("ball_lengths is empty: no external gaps to resample")
     ball = trk.ball.copy()
     players = trk.players.copy()
     n = len(ball)
-    lo, hi = np.log(BALL_BLOCK[0]), np.log(BALL_BLOCK[1])
     for a, b in trk.periods:
         a, b = max(int(a), 0), min(int(b), n)
         if b <= a:
@@ -106,7 +136,7 @@ def simulate_dropout(trk: Tracking, rng) -> Tracking:
         rows = b - a
         vis = ~np.isnan(ball[a:b, 0])
         gone = _mask_blocks(vis, int(np.ceil(BALL_SHARE * rows)),
-                            lambda r: np.exp(r.uniform(lo, hi)), rng)
+                            lambda r: ball_lengths[r.integers(len(ball_lengths))], rng)
         ball[a:b][gone] = np.nan
         for s in range(players.shape[1]):
             vis = ~np.isnan(players[a:b, s, 0])
@@ -159,10 +189,11 @@ def _seed_tag(*key: int) -> str:
     return "_".join(str(int(k)) for k in (SEED, *key))
 
 
-def _dropout_features(trk, k, key, use_cache, rng):
-    """(dropout copy features) for game k with rng seeded [SEED, *key] unless `rng` is given."""
-    copy = simulate_dropout(trk, rng)
-    return _features(copy, f"montreal_sample_g{k}_drop_{_seed_tag(*key)}", use_cache)
+def _dropout_features(trk, k, key, use_cache, rng, ball_lengths):
+    """Dropout-copy features for game k (rng given by the caller); the cache key carries the gaps."""
+    copy = simulate_dropout(trk, rng, ball_lengths)
+    return _features(copy, f"montreal_sample_g{k}_drop_{_seed_tag(*key)}_{_gap_tag(ball_lengths)}",
+                     use_cache)
 
 
 def _train_rows(F: np.ndarray, labels: np.ndarray):
@@ -180,7 +211,7 @@ def _columns(names) -> list[int]:
     return [FEATURE_NAMES.index(n) for n in names]
 
 
-def _fold(g: int, games, use_cache: bool, names=None) -> list[dict]:
+def _fold(g: int, games, use_cache: bool, names=None, ball_lengths=None) -> list[dict]:
     """Held-out game g (1-based): returns one row per (candidate, grid point).
 
     `names` is the feature subset the models see (default: all of FEATURE_NAMES); the full matrix
@@ -194,15 +225,16 @@ def _fold(g: int, games, use_cache: bool, names=None) -> list[dict]:
     for j, (trk, labels) in enumerate(games):
         if j == held:
             continue
-        copy = simulate_dropout(trk, rng)  # always drawn, so the stream never depends on the cache
-        F = _features(copy, f"montreal_sample_g{j + 1}_drop_{_seed_tag(g)}", use_cache)
+        copy = simulate_dropout(trk, rng, ball_lengths)  # always drawn: the stream never depends on the cache
+        F = _features(copy, f"montreal_sample_g{j + 1}_drop_{_seed_tag(g)}_{_gap_tag(ball_lengths)}", use_cache)
         X, y = _train_rows(F[:, cols], labels)
         Xs.append(X)
         ys.append(y)
     X, y = np.vstack(Xs), np.concatenate(ys)
 
     trk, gt = games[held]
-    F_eval = _dropout_features(trk, g, (100 + g,), use_cache, np.random.default_rng([SEED, 100 + g]))[:, cols]
+    F_eval = _dropout_features(trk, g, (100 + g,), use_cache, np.random.default_rng([SEED, 100 + g]),
+                              ball_lengths)[:, cols]
     periods = trk.periods
 
     rows = []
@@ -219,7 +251,8 @@ def _fold(g: int, games, use_cache: bool, names=None) -> list[dict]:
     return rows
 
 
-def logo(games, cache: bool = False, workers: int = 1, feature_names=None) -> pd.DataFrame:
+def logo(games, cache: bool = False, workers: int = 1, feature_names=None,
+         ball_lengths=None) -> pd.DataFrame:
     """Leave-one-game-out table. `games` is a list of (Tracking, label codes) for games 1..N.
 
     One row per (candidate, swap, dead, live), columns ``spell_f1_g<k>`` / ``macro_f1_g<k>`` for
@@ -227,15 +260,17 @@ def logo(games, cache: bool = False, workers: int = 1, feature_names=None) -> pd
     independent and are assembled in game order, so `workers` never changes the result.
     """
     games = [(t, np.asarray(lab)) for t, lab in games]
+    if ball_lengths is None:  # the gaps of the (clean) games themselves
+        ball_lengths = external_gap_lengths([t for t, _ in games])
     folds = list(range(1, len(games) + 1))
     if workers > 1:
         from concurrent.futures import ProcessPoolExecutor
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(_fold, folds, [games] * len(folds), [cache] * len(folds),
-                                    [feature_names] * len(folds)))
+                                    [feature_names] * len(folds), [ball_lengths] * len(folds)))
     else:
-        results = [_fold(g, games, cache, feature_names) for g in folds]
+        results = [_fold(g, games, cache, feature_names, ball_lengths) for g in folds]
 
     base = [(c.name, *pt) for c in CANDIDATES for pt in COST_GRID]
     table = pd.DataFrame(base, columns=["candidate", "swap", "dead", "live"])
@@ -301,13 +336,13 @@ def choose_feature_set(tables: dict[str, pd.DataFrame]) -> tuple[str, str]:
     return keep, text
 
 
-def _refit(games, cand: Candidate, names) -> dict:
+def _refit(games, cand: Candidate, names, ball_lengths) -> dict:
     """Softmax winner refit on all games' dropout copies (per-game seed [SEED, 200 + k])."""
     cols = _columns(names)
     Xs, ys = [], []
     for k, (trk, labels) in enumerate(games, start=1):
-        copy = simulate_dropout(trk, np.random.default_rng([SEED, 200 + k]))
-        F = _features(copy, f"montreal_sample_g{k}_drop_{_seed_tag(200 + k)}", True)
+        copy = simulate_dropout(trk, np.random.default_rng([SEED, 200 + k]), ball_lengths)
+        F = _features(copy, f"montreal_sample_g{k}_drop_{_seed_tag(200 + k)}_{_gap_tag(ball_lengths)}", True)
         X, y = _train_rows(F[:, cols], labels)
         Xs.append(X)
         ys.append(y)
@@ -337,13 +372,18 @@ def main(argv=None) -> int:
         share = [round(float((labels == c).mean()), 3) for c in range(4)]
         print(f"game {k}: rows={len(labels)} label shares H/A/D/X={share}")
     t_load = time.perf_counter() - t0
+    ball_lengths = external_gap_lengths([t for t, _ in games])
+    q = [int(v) for v in np.percentile(ball_lengths, [10, 50, 90])]
+    gap_summary = {"n": int(len(ball_lengths)), "p10": q[0], "p50": q[1], "p90": q[2],
+                   "max": int(ball_lengths.max()), "min_gap_rows": MIN_GAP}
+    print(f"external ball-gap lengths (rows, public sample games, >= {MIN_GAP}): {gap_summary}")
 
     sets = ["v1", "v2"] if args.feature_set == "both" else [args.feature_set]
     tables: dict[str, pd.DataFrame] = {}
     for fs in sets:
         t1 = time.perf_counter()
         tables[fs] = table = logo(games, cache=True, workers=args.workers,
-                                  feature_names=FEATURE_SETS[fs])
+                                  feature_names=FEATURE_SETS[fs], ball_lengths=ball_lengths)
         t_logo = time.perf_counter() - t1
         n_eval = len(table) * len(games)
         print(f"\n=== features {fs} ({len(FEATURE_SETS[fs])} columns) ===")
@@ -358,7 +398,8 @@ def main(argv=None) -> int:
     if len(sets) == 2:
         chosen, decision = choose_feature_set(tables)
     else:
-        chosen, decision = sets[0], f"features {sets[0]} forced by --feature-set"
+        chosen, decision = sets[0], (f"features {sets[0]} forced by --feature-set; the v1-vs-v2 decision "
+                                     "was made earlier by LOGO on the public sample games (external data)")
     print(f"\ndecision: {decision}")
 
     table = tables[chosen]
@@ -367,7 +408,7 @@ def main(argv=None) -> int:
     best = select(table)
     cand = next(c for c in CANDIDATES if c.name == best["candidate"])
     names = list(FEATURE_SETS[chosen])
-    emission = "heuristic" if cand.l2 is None else _refit(games, cand, names)
+    emission = "heuristic" if cand.l2 is None else _refit(games, cand, names, ball_lengths)
     costs = {"swap": _num(best["swap"]), "dead": _num(best["dead"]), "live": _num(best["live"])}
     params = {
         "emission": emission,
@@ -380,6 +421,8 @@ def main(argv=None) -> int:
             "feature_set": chosen,
             "n_features": len(names),
             "decision": decision,
+            "feature_set_decision_data": "external only: LOGO on the public Metrica sample games (v1 vs v2)",
+            "dropout_ball_gaps": gap_summary,
             "logo_best": {fs: _row_dict(select(tables[fs])) for fs in sets},
             "top5_by_feature_set": {fs: [_row_dict(r) for _, r in ranked(tables[fs]).head(5).iterrows()]
                                     for fs in sets},
