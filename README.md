@@ -11,12 +11,12 @@ contains only code, tests, the small trained-parameter file `models/params.json`
 
 ## How it works
 
-The pipeline uses no video. It reads the tactical automatic tracking (ATD) and computes 41
+The pipeline uses no video. It reads the tactical automatic tracking (ATD) and computes 51
 per-frame, team-level features: how far the nearest home and away players are from the ball,
 whether the ball is outside the pitch, how many players are nearly stationary, the shape and
-advance of each team, and short-window averages of these. A softmax regression turns the features
+advance of each team, how long each team has been nearest to the ball, signs of a stoppage or a restart (ball still, on a restart spot, players slowing or speeding up), and short-window averages of these. A softmax regression turns the features
 into per-frame log-probabilities for H, A and D. Where the ball is missing, the team-shape and
-carried-over features keep working. Smart Tagging adds a small, calibrated log-prior. A three-state
+carried-over features keep working. Smart Tagging nudges H against A only (a small, calibrated, capped shift that never changes how likely a frame is to be dead). A three-state
 Viterbi decoder with switch costs then turns the noisy per-frame scores into whole possessions,
 inside each half. Everything outside the published halves is `X`. The model and the switch costs
 are chosen by leave-one-game-out validation on the three public Metrica sample games, never on the
@@ -70,7 +70,7 @@ This clones the Metrica Sports public sample data
 .venv\Scripts\python -m montreal.train
 ```
 
-This repeats the leave-one-game-out search on the three sample games (about 5 minutes, one core) and
+This repeats the leave-one-game-out search on the three sample games (about 10 minutes on three cores: add `--workers 3`) and
 rewrites `models/params.json`. The file is committed, so you can skip this step: the submission
 needs only the match data and `models/params.json`.
 
@@ -87,16 +87,28 @@ tracking file, which takes a little longer). The run also prints one line labell
 only": the score on the organisers' public 5-minute window, shown to confirm that frames and labels
 are aligned. It is never used to choose any parameter.
 
+The submitted configuration (`models/params.json`) is a softmax regression (l2 = 0.001, balanced
+class weights) on the 51 features, with switch costs swap / dead / live = 10 / 40 / 40. It was chosen
+by leave-one-game-out validation on the three public sample games: mean spellF1 0.4599 (games
+0.4471, 0.4612, 0.4714), against 0.4504 for the best model on the 41 base features (v1) and 0.3078
+for the hand-set heuristic. Smart Tagging weights: attack 1.000, defend 1.000, set piece 0.566.
+
+The output of the run is: 240 possessions, mean duration 17.546 s, label counts H=61009 A=44265
+D=53583 X=40462, and one line labelled "public-window sanity check only" (spellF1 0.6000,
+macroF1 0.7002), which is only a check that frames and labels line up and was never used to choose
+anything.
+
 Expected SHA-256 of `submissions/Montreal.csv`:
 
 ```
-7e7c10bae5019dd290d8cf5cbe768de0f6741046d5088b6cff24deaca1ee1d6e
+914142a03e86cfb9d074245255e04c852626a24e1bb357425760c849077c52ae
 ```
 
-To check that the file regenerates byte for byte (two fresh runs, compared by SHA-256):
+To check that the file regenerates byte for byte (two fresh runs, compared by SHA-256), and the same\nwith an empty cache folder for each run (`--cold`):
 
 ```powershell
 .venv\Scripts\python scripts\check_reproducible.py
+.venv\Scripts\python scripts\check_reproducible.py --cold
 ```
 
 To validate with the organisers' script:
@@ -121,9 +133,9 @@ src/montreal/
   paths.py       locations (env overrides) and import of the official upstream scorer
   tracking.py    Tracking container; readers for the FIFA/EPTS tracking and Metrica CSV; cache
   events.py      Metrica sample games: events -> per-frame H/A/D/X labels (the possession rules)
-  features.py    41 per-frame team-level features
+  features.py    51 per-frame team-level features (41 base + 10 turnover / restart)
   emission.py    heuristic emission and numpy softmax regression
-  tagging.py     Smart Tagging -> calibrated, capped log-prior
+  tagging.py     Smart Tagging -> calibrated, capped, team-only (H vs A) adjustment
   decode.py      three-state Viterbi with switch costs, per half
   pipeline.py    features -> emission (+ prior) -> decode -> submission file
   run.py         CLI: python -m montreal.run
@@ -131,7 +143,7 @@ src/montreal/
   metrics.py     thin wrapper around the official spellF1 / macroF1
 scripts/
   fetch_sample_data.py   clone the public sample data at the pinned commit
-  check_reproducible.py  two fresh runs, compare SHA-256
+  check_reproducible.py  two fresh runs (optionally --cold), compare SHA-256
   render_pdf.py          technical document: Markdown -> HTML (stdlib) -> PDF (headless Edge)
 models/params.json       trained emission weights and switch costs (committed)
 docs/Montreal.md         technical document (source of the PDF)

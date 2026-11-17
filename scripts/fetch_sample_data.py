@@ -10,7 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from montreal.paths import SAMPLE_COMMIT, SAMPLE_REPO_URL, sample_dir  # noqa: E402
 
-# Optional local copy used instead of the network when it exists.
+# An optional local copy of the sample data (a developer convenience on the author's machine).
+# When it does not exist, the script falls back to cloning from GitHub (SAMPLE_REPO_URL).
 LOCAL_MIRROR = Path.home() / "Desktop" / "Projects" / "mtah-external" / "metrica-sample-data"
 
 
