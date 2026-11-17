@@ -1,0 +1,9 @@
+data/
+.cache/
+external/
+submissions/*.csv
+.venv/
+.playwright-cli/
+__pycache__/
+*.egg-info/
+.pytest_cache/
