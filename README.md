@@ -46,10 +46,13 @@ git clone https://github.com/omorsi45/montreal-mtah2027
 cd montreal-mtah2027
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m pip install -e . --no-deps
 ```
 
 On Linux or macOS use `python3.12 -m venv .venv` and `.venv/bin/python`. Dependencies are pinned
-in `requirements.txt` (numpy, pandas) and `requirements-dev.txt` (adds pytest).
+in `requirements.txt` (numpy, pandas and their dependencies) and `requirements-dev.txt` (adds
+pytest). The last command installs the `montreal` package itself (from `src/`) into the venv; it
+is what makes `python -m montreal.run` work.
 
 ## Fetch the public training data (only needed for training and the slow tests)
 

@@ -101,6 +101,7 @@ git clone https://github.com/omorsi45/montreal-mtah2027
 cd montreal-mtah2027
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m pip install -e . --no-deps
 .venv\Scripts\python -m montreal.run
 ```
 

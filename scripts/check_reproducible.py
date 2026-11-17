@@ -26,9 +26,10 @@ def sha256_of(path: Path) -> str:
 
 def run_once(out: Path) -> None:
     """One fresh interpreter: python -m montreal.run --out <out> (its stdout is not echoed)."""
+    # Same as the README: the package must be installed in this interpreter's environment
+    # (`pip install -e . --no-deps`). Nothing is injected into PYTHONPATH, so a missing install
+    # fails here instead of being hidden.
     env = dict(os.environ)
-    src = str(REPO / "src")
-    env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
     proc = subprocess.run(
         [sys.executable, "-m", "montreal.run", "--out", str(out)],
         cwd=REPO, env=env, capture_output=True, text=True,
