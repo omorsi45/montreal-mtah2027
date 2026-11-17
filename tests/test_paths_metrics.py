@@ -27,7 +27,8 @@ def test_default_paths(monkeypatch):
     assert paths.upstream_dir() == paths.repo_dir().parent / "more-than-a-hack-2027"
 
 
-def test_cache_dir_created():
+def test_cache_dir_created(monkeypatch):
+    monkeypatch.delenv("MONTREAL_CACHE_DIR", raising=False)  # the default location, whatever the shell sets
     c = paths.cache_dir()
     assert c.is_dir() and c.name == ".cache"
 
