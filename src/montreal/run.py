@@ -1,6 +1,6 @@
 """CLI: python -m montreal.run [--params models/params.json] [--out submissions/Montreal.csv].
 
-Prints aggregates only (label counts, possession count / mean duration, tag weights, SHA-256 and
+Prints aggregates only (label counts, possession count / mean duration, fixed tag weights, SHA-256 and
 one public-window sanity line). Never prints frame labels or rows.
 """
 
@@ -58,10 +58,10 @@ def main(argv=None) -> int:
     if weights is None:
         print("tag weights: not used")
     else:
-        print("tag weights: " + " ".join(f"{k}={v:.3f}" for k, v in sorted(weights.items())))
-    if info["calibration"]:
-        print("tag agreement p (support n): " + " ".join(
-            f"{k}={s['p']:.3f} ({s['n']})" for k, s in sorted(info["calibration"].items())))
+        print("tag weights (fixed): " + " ".join(f"{k}={v:.3f}" for k, v in sorted(weights.items())))
+    if info["agreement"]:
+        print("orientation check, tag agreement p (support n): " + " ".join(
+            f"{k}={s['p']:.3f} ({s['n']})" for k, s in sorted(info["agreement"].items())))
     if info["unknown_team_slots"] > 0:
         print(f"players with an unknown team id (ignored): {info['unknown_team_slots']}")
     print(f"sha256: {sha}")

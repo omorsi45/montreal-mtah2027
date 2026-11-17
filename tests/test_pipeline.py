@@ -12,6 +12,7 @@ from montreal import paths
 from montreal.emission import SoftmaxRegression
 from montreal.features import FEATURE_NAMES, V1_NAMES, compute_features
 from montreal.pipeline import (emission_logp, predict_codes, predict_match, write_submission)
+from montreal.tagging import TAG_WEIGHTS
 from montreal.tracking import Tracking
 
 HEURISTIC = {
@@ -145,6 +146,42 @@ def test_emission_logp_selects_the_stored_columns_by_name():
                                shuffled.log_proba(F[:, perm]))
     # the heuristic reads its columns by name from the full matrix too
     assert emission_logp(F, HEURISTIC).shape == (80, 3)
+
+def _patched_match(monkeypatch, confident):
+    """Run predict_match_detailed on the synthetic match with fixed tags and a given tracking-side
+    `confident` array (the only thing the agreement statistics depend on)."""
+    import montreal.pipeline as pl
+
+    trk = _moving_match()
+    tags = [{"code": "BUILD UP", "start": 0, "stop": 300, "team": "H", "type": ""},
+            {"code": "BUILD UP", "start": 300, "stop": 600, "team": "A", "type": ""}]
+    games = type("G", (), {"asset_paths": staticmethod(lambda *a, **k: {"smart_tagging": "x.xml"})})
+    monkeypatch.setattr(pl, "load_competition", lambda: trk)
+    monkeypatch.setattr(pl.paths, "upstream", lambda: (games, None))
+    monkeypatch.setattr(pl.paths, "data_dir", lambda: Path("."))
+    monkeypatch.setattr(pl, "load_tags", lambda path, fps=25: tags)
+    monkeypatch.setattr(pl, "confident_team", lambda F, names: confident)
+    return pl.predict_match_detailed(HEURISTIC)
+
+
+def test_output_independent_of_agreement(monkeypatch):
+    perfect = np.zeros(1000, dtype=np.int8)
+    perfect[:300], perfect[300:600] = 1, -1  # agrees with every attack vote: p = 1.0
+    mixed = perfect.copy()
+    mixed[300:420] = 1  # disagrees on 120 of 600 frames: p = 0.8, still not flipped
+    codes_a, weights_a, info_a = _patched_match(monkeypatch, perfect)
+    codes_b, weights_b, info_b = _patched_match(monkeypatch, mixed)
+    assert info_a["agreement"]["attack"]["p"] != info_b["agreement"]["attack"]["p"]
+    assert weights_a == weights_b == TAG_WEIGHTS  # fixed, whatever the agreement
+    np.testing.assert_array_equal(codes_a, codes_b)
+
+
+def test_orientation_check_aborts_when_flipped(monkeypatch):
+    flipped = np.zeros(1000, dtype=np.int8)
+    flipped[:300], flipped[300:600] = -1, 1
+    with pytest.raises(RuntimeError, match="flipped"):
+        _patched_match(monkeypatch, flipped)
+
 
 @pytest.mark.slow
 def test_run_twice_identical():

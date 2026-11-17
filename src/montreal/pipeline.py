@@ -12,7 +12,7 @@ from montreal import paths
 from montreal.decode import cost_matrix, decode_periods
 from montreal.emission import SoftmaxRegression, heuristic_logp
 from montreal.features import FEATURE_NAMES, compute_features
-from montreal.tagging import (apply_tag_prior, calibrate, calibration_stats, check_orientation,
+from montreal.tagging import (TAG_WEIGHTS, agreement_stats, apply_tag_prior, check_orientation,
                               confident_team, goal_dead, load_tags, tag_votes)
 from montreal.tracking import Tracking, load_competition
 
@@ -60,17 +60,18 @@ def predict_codes(trk: Tracking, F: np.ndarray, params: dict, tags: dict | None 
 
 
 def predict_match_detailed(params: dict, use_tags: bool | None = None) -> tuple[np.ndarray, dict | None, dict]:
-    """Run the competition match; returns (codes, calibrated tag weights or None, info).
+    """Run the competition match; returns (codes, fixed tag weights or None, info).
 
     `use_tags` overrides ``params["use_tags"]`` (for label-free with/without diagnostics).
-    `info` holds aggregates only: ``unknown_team_slots`` and ``calibration`` (per family raw
-    agreement ``p`` and support ``n``, or None when tags are off). Raises RuntimeError if the
+    `info` holds aggregates only: ``unknown_team_slots`` and ``agreement`` (per family raw
+    tag-vs-tracking agreement ``p`` and support ``n``, or None when tags are off). The agreement is an
+    automatic orientation check only: it never changes the output. Raises RuntimeError if the
     attack tags disagree with the tracking (H and A flipped).
     """
     trk = load_competition()
     F = compute_features(trk)
     n = len(trk.ball)
-    info = {"unknown_team_slots": int((np.asarray(trk.team) < 0).sum()), "calibration": None}
+    info = {"unknown_team_slots": int((np.asarray(trk.team) < 0).sum()), "agreement": None}
     tags_in = None
     weights = None
     if params.get("use_tags") if use_tags is None else use_tags:
@@ -79,9 +80,9 @@ def predict_match_detailed(params: dict, use_tags: bool | None = None) -> tuple[
         tags = load_tags(assets["smart_tagging"], fps=trk.fps)
         votes = tag_votes(tags, n)
         confident = confident_team(F, FEATURE_NAMES)
-        info["calibration"] = calibration_stats(votes, confident)
-        check_orientation(info["calibration"])
-        weights = calibrate(votes, confident)
+        info["agreement"] = agreement_stats(votes, confident)
+        check_orientation(info["agreement"])  # abort-only check; never changes the output
+        weights = dict(TAG_WEIGHTS)
         tags_in = {"votes": votes, "weights": weights,
                    "goal_mask": goal_dead(tags, n, fps=trk.fps)}
     return predict_codes(trk, F, params, tags=tags_in), weights, info

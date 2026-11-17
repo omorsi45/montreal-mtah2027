@@ -1,9 +1,10 @@
-"""Smart Tagging (SportsCode XML) as a capped, calibrated team-only adjustment of the log-scores.
+"""Smart Tagging (SportsCode XML) as a capped, fixed-weight, team-only adjustment of the log-scores.
 
 Smart Tagging is Metrica's automatic annotation of tactical phases and set pieces. It is *not*
-ground truth. Each tag family is weighted by how often its team vote agrees with confident
-tracking evidence (ball visible, one team's nearest player at the ball and the other far away) --
-never by agreement with any label. Weights are capped, and the net vote is capped too, so the\ntags can only nudge H against A; they never move a frame between alive and dead (except the\nadditive goal-dead term).
+ground truth. The tag families carry fixed design weights (`TAG_WEIGHTS`, set a priori, fitted to
+no data), and the net vote is capped, so the tags can only nudge H against A; they never move a
+frame between alive and dead (except the additive goal-dead term). The tracking-vs-tag agreement
+statistics are an automatic orientation check only: they can abort a run, never change its output.
 
 Codes H=0, A=1, D=2.
 """
@@ -30,9 +31,11 @@ TEAM_A = {"atletic club", "athletic club"}
 
 GOAL_CAP_SECONDS = 90
 MIN_RUN = 25
-MIN_CALIBRATION_FRAMES = 250
-WEIGHT_CAP = 1.0
-P_EPS = 1e-6  # Ruling R5: clip p before the log-odds
+MIN_CHECK_FRAMES = 250  # minimum support before the orientation check can abort a run
+
+# Fixed a priori, not fitted to any data: no external game carries Smart Tagging to tune them on.
+# With the net cap of 1 nat in `apply_tag_prior`, a frame's net vote moves H vs A by at most 1 nat.
+TAG_WEIGHTS = {"attack": 1.0, "defend": 1.0, "setpiece": 1.0}
 
 
 def _team(text: str | None) -> str | None:
@@ -151,7 +154,7 @@ def confident_team(F: np.ndarray, names: list[str]) -> np.ndarray:
     return out
 
 
-def calibration_stats(votes: dict[str, np.ndarray], confident: np.ndarray) -> dict[str, dict]:
+def agreement_stats(votes: dict[str, np.ndarray], confident: np.ndarray) -> dict[str, dict]:
     """Per family: ``n`` = frames with both a vote and a confident tracking team, ``p`` = the raw
     share of them where the two agree (NaN when ``n`` is 0)."""
     stats = {}
@@ -166,23 +169,11 @@ def calibration_stats(votes: dict[str, np.ndarray], confident: np.ndarray) -> di
 def check_orientation(stats: dict[str, dict]) -> None:
     """Fail loudly if the attack tags agree with the tracking less than chance (H and A flipped)."""
     s = stats.get("attack")
-    if s and s["n"] >= MIN_CALIBRATION_FRAMES and s["p"] < 0.5:
+    if s and s["n"] >= MIN_CHECK_FRAMES and s["p"] < 0.5:
         raise RuntimeError(
             f"Smart Tagging attack tags agree with the tracking in only {s['p']:.3f} of "
             f"{s['n']} confident frames: home and away look flipped between the tags and the "
             "tracking. Check the team mapping before running.")
-
-
-def calibrate(votes: dict[str, np.ndarray], confident: np.ndarray) -> dict[str, float]:
-    """Weight per family: capped log-odds of agreeing with the confident tracking evidence."""
-    weights = {}
-    for family, s in calibration_stats(votes, confident).items():
-        if s["n"] < MIN_CALIBRATION_FRAMES:
-            weights[family] = 0.0
-            continue
-        p = min(max(s["p"], P_EPS), 1.0 - P_EPS)
-        weights[family] = float(np.clip(np.log(p / (1.0 - p)), 0.0, WEIGHT_CAP))
-    return weights
 
 
 def _log_sigmoid(x: np.ndarray) -> np.ndarray:
@@ -194,8 +185,8 @@ def apply_tag_prior(logp: np.ndarray, votes: dict[str, np.ndarray], weights: dic
                     goal_mask: np.ndarray, w_goal: float = 1.0, v_cap: float = 1.0) -> np.ndarray:
     """Team-only Smart Tagging adjustment of the (n, 3) log-probabilities over H/A/D.
 
-    The calibrated weights only measure H-versus-A agreement (on frames where play is alive), so
-    the votes may only move H against A. Each frame keeps its alive mass ``logaddexp(H, A)`` and
+    The tag votes only describe H-versus-A (on frames where play is alive), so they may only move
+    H against A. Each frame keeps its alive mass ``logaddexp(H, A)`` and
     its D score. With ``z = H - A``, ``alive = logaddexp(H, A)`` and the net signed vote
     ``v = clip(sum_f w_f * vote_f, -v_cap, v_cap)``::
 
