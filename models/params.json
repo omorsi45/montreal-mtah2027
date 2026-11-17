@@ -1,0 +1,12 @@
+{
+  "costs": {
+    "dead": 10,
+    "live": 10,
+    "swap": 20
+  },
+  "emission": "heuristic",
+  "meta": {
+    "source": "hand-set M1"
+  },
+  "use_tags": true
+}
