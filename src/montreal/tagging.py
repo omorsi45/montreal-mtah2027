@@ -48,8 +48,11 @@ def load_tags(path, fps: int = 25) -> list[dict]:
     """Read the SportsCode XML. Frames are ``round(seconds * fps)``, half-open ``[start, stop)``."""
     out = []
     for instance in ET.parse(path).iter("instance"):
-        start_s = float(instance.findtext("start"))
-        end_s = float(instance.findtext("end"))
+        try:
+            start_s = float(instance.findtext("start"))
+            end_s = float(instance.findtext("end"))
+        except (TypeError, ValueError):  # no <start> or <end> (or not a number): skip the instance
+            continue
         team_text = None
         type_text = ""
         for label in instance.findall("label"):
@@ -148,17 +151,36 @@ def confident_team(F: np.ndarray, names: list[str]) -> np.ndarray:
     return out
 
 
+def calibration_stats(votes: dict[str, np.ndarray], confident: np.ndarray) -> dict[str, dict]:
+    """Per family: ``n`` = frames with both a vote and a confident tracking team, ``p`` = the raw
+    share of them where the two agree (NaN when ``n`` is 0)."""
+    stats = {}
+    for family, vote in votes.items():
+        both = (vote != 0) & (confident != 0)
+        n = int(both.sum())
+        agree = int((np.sign(vote[both]) == confident[both]).sum())
+        stats[family] = {"n": n, "p": agree / n if n else float("nan")}
+    return stats
+
+
+def check_orientation(stats: dict[str, dict]) -> None:
+    """Fail loudly if the attack tags agree with the tracking less than chance (H and A flipped)."""
+    s = stats.get("attack")
+    if s and s["n"] >= MIN_CALIBRATION_FRAMES and s["p"] < 0.5:
+        raise RuntimeError(
+            f"Smart Tagging attack tags agree with the tracking in only {s['p']:.3f} of "
+            f"{s['n']} confident frames: home and away look flipped between the tags and the "
+            "tracking. Check the team mapping before running.")
+
+
 def calibrate(votes: dict[str, np.ndarray], confident: np.ndarray) -> dict[str, float]:
     """Weight per family: capped log-odds of agreeing with the confident tracking evidence."""
     weights = {}
-    for family, vote in votes.items():
-        both = (vote != 0) & (confident != 0)
-        m = int(both.sum())
-        if m < MIN_CALIBRATION_FRAMES:
+    for family, s in calibration_stats(votes, confident).items():
+        if s["n"] < MIN_CALIBRATION_FRAMES:
             weights[family] = 0.0
             continue
-        agree = int((np.sign(vote[both]) == confident[both]).sum())
-        p = min(max(agree / m, P_EPS), 1.0 - P_EPS)
+        p = min(max(s["p"], P_EPS), 1.0 - P_EPS)
         weights[family] = float(np.clip(np.log(p / (1.0 - p)), 0.0, WEIGHT_CAP))
     return weights
 

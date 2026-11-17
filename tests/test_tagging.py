@@ -1,9 +1,10 @@
 """Smart Tagging tests -- synthetic SportsCode XML only."""
 
 import numpy as np
+import pytest
 
-from montreal.tagging import (apply_tag_prior, calibrate, confident_team, goal_dead, load_tags,
-                              tag_votes)
+from montreal.tagging import (apply_tag_prior, calibrate, calibration_stats, check_orientation,
+                              confident_team, goal_dead, load_tags, tag_votes)
 
 NAMES = ["ball_vis", "d_home", "d_away"]
 
@@ -191,3 +192,40 @@ def test_apply_tag_prior_zero_votes_is_identity_and_stable_for_extreme_logits():
     assert np.isfinite(out).all()
     np.testing.assert_allclose(np.logaddexp(out[:, 0], out[:, 1]),
                                np.logaddexp(ext[:, 0], ext[:, 1]), atol=1e-9)
+
+
+def test_calibration_stats_report_agreement_and_support():
+    conf = np.ones(1000, dtype=np.int8)
+    vote = np.ones(1000, dtype=np.int8)
+    vote[:100] = -1  # 90% agreement on 1000 supported frames
+    stats = calibration_stats({"attack": vote}, conf)
+    stats.update(calibration_stats({"tiny": np.ones(100, dtype=np.int8)}, conf[:100]))
+    assert stats["attack"]["n"] == 1000 and abs(stats["attack"]["p"] - 0.9) < 1e-12
+    assert stats["tiny"]["n"] == 100 and stats["tiny"]["p"] == 1.0
+    empty = calibration_stats({"x": np.zeros(10, dtype=np.int8)}, np.ones(10, dtype=np.int8))
+    assert empty["x"]["n"] == 0 and np.isnan(empty["x"]["p"])
+    # calibrate still gives the capped log-odds from the same agreement
+    assert calibrate({"attack": vote}, conf)["attack"] == 1.0
+
+
+def test_orientation_guard_fails_when_attack_agreement_below_half():
+    ok = {"attack": {"p": 0.73, "n": 4000}, "defend": {"p": 0.3, "n": 5000}}
+    check_orientation(ok)  # the guard looks at the attack family only
+    check_orientation({"attack": {"p": 0.2, "n": 249}})  # too little support to judge
+    check_orientation({"attack": {"p": 0.5, "n": 4000}})  # exactly 0.5 is not flipped
+    with pytest.raises(RuntimeError, match="flipped"):
+        check_orientation({"attack": {"p": 0.2, "n": 250}})
+    check_orientation({})  # no attack family: nothing to check
+
+
+def test_load_tags_skips_instances_without_start_or_end(tmp_path):
+    path = tmp_path / "tags.xml"
+    path.write_text(
+        "<file><ALL_INSTANCES>"
+        "<instance><ID>1</ID><end>3.0</end><code>BUILD UP</code></instance>"
+        "<instance><ID>2</ID><start>1.0</start><code>BUILD UP</code></instance>"
+        "<instance><ID>3</ID><start></start><end>2.0</end><code>BUILD UP</code></instance>"
+        + _instance("BUILD UP", 1.0, 3.0, [("Team", "Barcelona")]) +
+        "</ALL_INSTANCES></file>")
+    tags = load_tags(path)
+    assert len(tags) == 1 and (tags[0]["start"], tags[0]["stop"]) == (25, 75)

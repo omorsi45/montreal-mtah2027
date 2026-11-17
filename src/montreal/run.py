@@ -37,7 +37,7 @@ def main(argv=None) -> int:
 
     params_path, out_path = Path(args.params), Path(args.out)
     params = load_params(params_path)
-    codes, weights = predict_match_detailed(params)
+    codes, weights, info = predict_match_detailed(params)
     sha = write_submission(codes, out_path)
 
     _, pm = paths.upstream()
@@ -59,6 +59,11 @@ def main(argv=None) -> int:
         print("tag weights: not used")
     else:
         print("tag weights: " + " ".join(f"{k}={v:.3f}" for k, v in sorted(weights.items())))
+    if info["calibration"]:
+        print("tag agreement p (support n): " + " ".join(
+            f"{k}={s['p']:.3f} ({s['n']})" for k, s in sorted(info["calibration"].items())))
+    if info["unknown_team_slots"] > 0:
+        print(f"players with an unknown team id (ignored): {info['unknown_team_slots']}")
     print(f"sha256: {sha}")
 
     gt_path = paths.upstream_dir() / GT_RELATIVE

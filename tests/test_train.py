@@ -139,3 +139,11 @@ def test_logo_runs_on_tiny_synthetic_games(monkeypatch):
     assert list(table["candidate"].unique()) == [c.name for c in train.CANDIDATES]
     again = train.logo(games)
     pd.testing.assert_frame_equal(table, again)  # deterministic
+
+
+def test_feature_cache_signature_depends_on_code_version(monkeypatch):
+    trk = _trk(n=300, periods=[(0, 300)])
+    sig = train._signature(trk)
+    assert sig == train._signature(trk)
+    monkeypatch.setattr(train, "_code_version", lambda: "another version of features.py")
+    assert train._signature(trk) != sig

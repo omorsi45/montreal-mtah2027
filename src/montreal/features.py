@@ -141,7 +141,7 @@ def _period_features(
     L, W = pitch
     idx = np.arange(m)
     is_home = team == 0
-    Ph, Pa = players[:, is_home, :], players[:, ~is_home, :]
+    Ph, Pa = players[:, is_home, :], players[:, team == 1, :]
     col: dict[str, np.ndarray] = {}
 
     # ---- ball ---------------------------------------------------------------------------
@@ -237,6 +237,8 @@ def compute_features(trk: Tracking) -> np.ndarray:
     n = len(trk.ball)
     F = np.zeros((n, len(FEATURE_NAMES)), dtype=np.float64)
     team = np.asarray(trk.team)
+    players = trk.players[:, team >= 0]  # slots of an unknown team (-1) are ignored
+    team = team[team >= 0]
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         for start, stop in trk.periods:
@@ -244,6 +246,6 @@ def compute_features(trk: Tracking) -> np.ndarray:
             if b <= a:
                 continue
             F[a:b] = _period_features(
-                trk.ball[a:b], trk.players[a:b], team, trk.pitch, trk.fps
+                trk.ball[a:b], players[a:b], team, trk.pitch, trk.fps
             )
     return np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)

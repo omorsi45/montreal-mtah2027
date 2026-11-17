@@ -253,3 +253,20 @@ def test_periods_clipped_to_tracking_length():
     f = _feat(_trk(ball, players, [0, 0, 1, 1], periods=[(80, 500), (95, 95), (-5, 3)]))
     assert f["ball_vis"][80:].sum() == 20 and f["ball_vis"][0:3].sum() == 3
     assert f["ball_vis"][3:80].sum() == 0
+
+
+def test_unknown_team_slots_are_ignored_by_every_feature():
+    from montreal.tracking import Tracking
+    n = 200
+    rng = np.random.default_rng(11)
+    ball = np.stack([40.0 + 0.05 * np.arange(n), np.full(n, 30.0)], axis=1)
+    base = np.stack([ball + rng.normal(0, 6.0, (n, 2)) for _ in range(6)], axis=1)
+    team = np.array([0, 0, 0, 1, 1, 1], dtype=np.int8)
+    ref = np.stack([ball + np.array([0.1, 0.1]) for _ in range(1)], axis=1)  # on the ball
+    with_ref = Tracking(ball=ball, players=np.concatenate([base, ref], axis=1),
+                        team=np.concatenate([team, [-1]]).astype(np.int8),
+                        periods=[(0, n)], pitch=(105.0, 68.0))
+    without = Tracking(ball=ball, players=base, team=team, periods=[(0, n)], pitch=(105.0, 68.0))
+    Fa, Fb = compute_features(with_ref), compute_features(without)
+    assert np.isfinite(Fa).all()
+    np.testing.assert_allclose(Fa, Fb, atol=1e-12)

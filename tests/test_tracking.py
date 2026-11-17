@@ -241,3 +241,40 @@ def test_competition_cache_reused(monkeypatch, tmp_path):
     raw.write_text(RAW + "\n\n", encoding="utf-8")
     tracking.load_competition()
     assert calls["n"] == 2
+
+
+def test_epts_unknown_team_id_is_not_an_away_player(tmp_path):
+    meta, raw = _write_epts(tmp_path)
+    text = meta.read_text(encoding="utf-8").replace('<Player id="P3" teamId="TB"/>',
+                                                    '<Player id="P3" teamId="REF"/>')
+    meta.write_text(text, encoding="utf-8")
+    t = read_epts(meta, raw, (105.0, 68.0))
+    assert t.team.tolist() == [0, 0, -1]
+    assert t.team.dtype == np.int8
+
+
+def test_competition_cache_invalidated_by_code_version(monkeypatch, tmp_path):
+    games, _ = paths.upstream()
+    data = tmp_path / "data"
+    folder = data / "tactical"
+    folder.mkdir(parents=True)
+    (folder / "BAR-ATH_tactical_atd.xml").write_text(_meta_xml(PARAMS), encoding="utf-8")
+    (folder / "BAR-ATH_tactical_atd.txt").write_text(RAW + "\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("MTAH_DATA_DIR", str(data))
+    monkeypatch.setattr(paths, "cache_dir", lambda: cache)
+    calls = {"n": 0}
+    original = tracking.read_epts
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tracking, "read_epts", counting)
+    tracking.load_competition()
+    tracking.load_competition()
+    assert calls["n"] == 1
+    monkeypatch.setattr(tracking, "_code_version", lambda: "a different reader")
+    tracking.load_competition()
+    assert calls["n"] == 2  # same raw file, new code -> not reused

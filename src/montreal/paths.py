@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 import sys
@@ -42,10 +43,23 @@ def sample_dir() -> Path:
 
 
 def cache_dir() -> Path:
-    """<repo>/.cache, created on demand."""
-    path = repo_dir() / ".cache"
+    """Cache folder, created on demand: env MONTREAL_CACHE_DIR, default <repo>/.cache."""
+    env = os.environ.get("MONTREAL_CACHE_DIR")
+    path = Path(env) if env else repo_dir() / ".cache"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def source_digest(*files) -> str:
+    """SHA-256 of the source text of `files` (line endings normalised), for cache keys.
+
+    A cached array is only reused when the code that produced it is byte-for-byte the same.
+    """
+    h = hashlib.sha256()
+    for f in files:
+        h.update(Path(f).read_bytes().replace(b"\r\n", b"\n"))
+        h.update(b"\0")
+    return h.hexdigest()
 
 
 def upstream() -> tuple[ModuleType, ModuleType]:

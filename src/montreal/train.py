@@ -121,9 +121,16 @@ def simulate_dropout(trk: Tracking, rng) -> Tracking:
 # --------------------------------------------------------------------------------------
 
 
+def _code_version() -> str:
+    """Digest of the code that makes the cached features: features.py and tracking.py."""
+    here = Path(__file__).resolve().parent
+    return paths.source_digest(here / "features.py", here / "tracking.py")
+
+
 def _signature(trk: Tracking) -> str:
-    """Digest of the missingness pattern + feature names; guards cached features against drift."""
+    """Digest of the missingness pattern, feature names and code version; guards cached features."""
     h = hashlib.sha256()
+    h.update(_code_version().encode())
     h.update(np.packbits(np.isnan(trk.ball[:, 0])).tobytes())
     h.update(np.packbits(np.isnan(trk.players[..., 0])).tobytes())
     h.update(repr((trk.ball.shape, trk.players.shape, trk.periods, FEATURE_NAMES)).encode())

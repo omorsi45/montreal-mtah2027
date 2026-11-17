@@ -47,3 +47,23 @@ def test_score_perfect_and_constant():
     assert const["spell_f1"] == 0.0
     assert const["n_pred_spells"] == 0
     assert const["n_gt_spells"] == 2
+
+
+def test_cache_dir_env_override(monkeypatch, tmp_path):
+    target = tmp_path / "elsewhere" / "cache"
+    monkeypatch.setenv("MONTREAL_CACHE_DIR", str(target))
+    assert paths.cache_dir() == target
+    assert target.is_dir()  # created on demand
+    monkeypatch.delenv("MONTREAL_CACHE_DIR")
+    assert paths.cache_dir() == paths.repo_dir() / ".cache"
+
+
+def test_source_digest_changes_with_content_and_ignores_line_endings(tmp_path):
+    a = tmp_path / "a.py"
+    b = tmp_path / "b.py"
+    a.write_bytes(b"x = 1\nprint(x)\n")
+    b.write_bytes(b"x = 1\r\nprint(x)\r\n")
+    assert paths.source_digest(a) == paths.source_digest(b)
+    b.write_bytes(b"x = 2\r\nprint(x)\r\n")
+    assert paths.source_digest(a) != paths.source_digest(b)
+    assert paths.source_digest(a, b) != paths.source_digest(b, a)

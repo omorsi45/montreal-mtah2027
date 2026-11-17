@@ -143,3 +143,16 @@ def test_run_twice_identical():
     b = predict_match(params)
     assert a.shape == (199319,)
     assert np.array_equal(a, b)
+
+
+def test_committed_params_load_through_emission_logp_and_match_feature_names():
+    import json
+    from montreal.pipeline import load_params
+    params = load_params(paths.repo_dir() / "models" / "params.json")
+    assert isinstance(params["emission"], dict)
+    assert params["emission"]["feature_names"] == FEATURE_NAMES
+    F = np.random.default_rng(5).normal(size=(40, len(FEATURE_NAMES)))
+    logp = emission_logp(F, params)
+    assert logp.shape == (40, 3) and np.isfinite(logp).all()
+    np.testing.assert_allclose(np.exp(logp).sum(axis=1), 1.0, atol=1e-9)
+    assert set(params["costs"]) == {"swap", "dead", "live"}

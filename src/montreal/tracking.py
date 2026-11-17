@@ -80,7 +80,10 @@ def _parse_meta(meta_path):
                 params.setdefault(name, value or "")
 
     slot_of = {pid: i for i, (pid, _) in enumerate(players)}
-    team = np.array([teams.index(tid) if tid in teams else 1 for _, tid in players], dtype=np.int8)
+    # Only the first two <Team> ids are the two teams; any other teamId (referee, unknown, ...)
+    # gets code -1 and is ignored by every feature, like a slot with NaN positions.
+    two = teams[:2]
+    team = np.array([two.index(tid) if tid in two else -1 for _, tid in players], dtype=np.int8)
 
     specs: list[_Spec] = []
     for node in spec_nodes:
@@ -245,17 +248,23 @@ def read_metrica_csv(home_csv, away_csv, pitch) -> Tracking:
 # --------------------------------------------------------------------------------------
 
 
+def _code_version() -> str:
+    """Digest of this module's source: the cached arrays are only valid for the reader that made them."""
+    return paths.source_digest(__file__)
+
+
 def _cache_key(raw_path: str) -> np.ndarray:
     st = os.stat(raw_path)
     return np.array([st.st_size, st.st_mtime_ns], dtype=np.int64)
 
 
-def _load_cache(cache_file: Path, key: np.ndarray, raw_path: str):
+def _load_cache(cache_file: Path, key: np.ndarray, raw_path: str, code: str):
     if not cache_file.exists():
         return None
     try:
         with np.load(cache_file, allow_pickle=False) as z:
-            if not np.array_equal(z["key"], key) or str(z["raw_path"]) != raw_path:
+            if (not np.array_equal(z["key"], key) or str(z["raw_path"]) != raw_path
+                    or str(z["code"]) != code):
                 return None
             return Tracking(
                 ball=z["ball"],
@@ -277,7 +286,8 @@ def load_competition() -> Tracking:
     key = _cache_key(raw_path)
     cache_file = Path(paths.cache_dir()) / CACHE_NAME
 
-    cached = _load_cache(cache_file, key, raw_path)
+    code = _code_version()
+    cached = _load_cache(cache_file, key, raw_path, code)
     if cached is not None:
         return cached
 
@@ -296,6 +306,7 @@ def load_competition() -> Tracking:
         fps=np.array(t.fps, dtype=np.int64),
         key=key,
         raw_path=np.array(raw_path),
+        code=np.array(code),
     )
     os.replace(tmp, cache_file)
     return t
