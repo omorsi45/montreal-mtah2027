@@ -7,3 +7,5 @@ submissions/*.csv
 __pycache__/
 *.egg-info/
 .pytest_cache/
+docs/*.pdf
+docs/*.html
