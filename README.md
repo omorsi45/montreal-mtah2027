@@ -16,11 +16,11 @@ per-frame, team-level features: how far the nearest home and away players are fr
 whether the ball is outside the pitch, how many players are nearly stationary, the shape and
 advance of each team, how long each team has been nearest to the ball, signs of a stoppage or a restart (ball still, on a restart spot, players slowing or speeding up), and short-window averages of these. A softmax regression turns the features
 into per-frame log-probabilities for H, A and D. Where the ball is missing, the team-shape and
-carried-over features keep working. Smart Tagging nudges H against A only (a small, calibrated, capped shift that never changes how likely a frame is to be dead). A three-state
+carried-over features keep working. Smart Tagging nudges H against A only (a small, capped shift with fixed design weights, not fitted to any data, that never changes how likely a frame is to be dead). A three-state
 Viterbi decoder with switch costs then turns the noisy per-frame scores into whole possessions,
 inside each half. Everything outside the published halves is `X`. The model and the switch costs
 are chosen by leave-one-game-out validation on the three public Metrica sample games, never on the
-competition match. See the technical document for the details.
+competition match. The simulated ball gaps used in training are resampled from those games' own gaps. See the technical document for the details.
 
 ## Prerequisites
 
@@ -87,21 +87,22 @@ tracking file, which takes a little longer). The run also prints one line labell
 only": the score on the organisers' public 5-minute window, shown to confirm that frames and labels
 are aligned. It is never used to choose any parameter.
 
-The submitted configuration (`models/params.json`) is a softmax regression (l2 = 0.001, balanced
-class weights) on the 51 features, with switch costs swap / dead / live = 10 / 40 / 40. It was chosen
-by leave-one-game-out validation on the three public sample games: mean spellF1 0.4599 (games
-0.4471, 0.4612, 0.4714), against 0.4504 for the best model on the 41 base features (v1) and 0.3078
-for the hand-set heuristic. Smart Tagging weights: attack 1.000, defend 1.000, set piece 0.566.
+The submitted configuration (`models/params.json`) is a softmax regression (l2 = 0.001, no class
+weights) on the 51 features, with switch costs swap / dead / live = 5 / 40 / 40. It was chosen
+by leave-one-game-out validation on the three public sample games: mean spellF1 0.4943 (games
+0.4877, 0.4981, 0.4971), against 0.4764 for the best model on the 41 base features (v1) and 0.3208
+for the hand-set heuristic. Smart Tagging weights (fixed constants, not fitted): attack 1.000,
+defend 1.000, set piece 1.000.
 
-The output of the run is: 240 possessions, mean duration 17.546 s, label counts H=61009 A=44265
-D=53583 X=40462, and one line labelled "public-window sanity check only" (spellF1 0.6000,
-macroF1 0.7002), which is only a check that frames and labels line up and was never used to choose
+The output of the run is: 240 possessions, mean duration 17.582 s, label counts H=62720 A=42774
+D=53363 X=40462, and one line labelled "public-window sanity check only" (spellF1 0.6000,
+macroF1 0.7001), which is only a check that frames and labels line up and was never used to choose
 anything.
 
 Expected SHA-256 of `submissions/Montreal.csv`:
 
 ```
-914142a03e86cfb9d074245255e04c852626a24e1bb357425760c849077c52ae
+7e47ef64d6d6de764e68539b94a4f122d9c4bc73db1aa3f8418f27265bbf2451
 ```
 
 To check that the file regenerates byte for byte (two fresh runs, compared by SHA-256), and the same
@@ -136,7 +137,7 @@ src/montreal/
   events.py      Metrica sample games: events -> per-frame H/A/D/X labels (the possession rules)
   features.py    51 per-frame team-level features (41 base + 10 turnover / restart)
   emission.py    heuristic emission and numpy softmax regression
-  tagging.py     Smart Tagging -> calibrated, capped, team-only (H vs A) adjustment
+  tagging.py     Smart Tagging -> fixed-weight, capped, team-only (H vs A) adjustment
   decode.py      three-state Viterbi with switch costs, per half
   pipeline.py    features -> emission (+ prior) -> decode -> submission file
   run.py         CLI: python -m montreal.run
