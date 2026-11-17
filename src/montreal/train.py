@@ -37,8 +37,8 @@ PLAYER_BLOCK = (25, 250)  # uniform block length (rows)
 TRAIN_STRIDE = 5  # train on every 5th row
 _MAX_BLOCKS = 20_000  # safety valve against pathological (almost fully missing) inputs
 
-COST_GRID: list[tuple[int, int, int]] = list(
-    itertools.product((10, 20, 40, 80, 160), (5, 10, 20, 40), (5, 10, 20, 40))
+COST_GRID: list[tuple[float, float, float]] = list(
+    itertools.product((2.5, 5, 10, 20, 40, 80, 160), (2.5, 5, 10, 20, 40), (2.5, 5, 10, 20, 40))
 )  # (swap, dead, live)
 
 
@@ -248,10 +248,16 @@ def ranked(table: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------------------
 
 
+def _num(v) -> int | float:
+    """A cost as int when it is whole (10.0 -> 10), else float (2.5); never truncates."""
+    v = float(v)
+    return int(v) if v.is_integer() else v
+
+
 def _row_dict(row: pd.Series) -> dict:
     out = {"candidate": str(row["candidate"])}
     for k in ("swap", "dead", "live"):
-        out[k] = int(row[k])
+        out[k] = _num(row[k])
     for k in row.index:
         if k.startswith(("spell_f1_", "macro_f1_")):
             out[k] = round(float(row[k]), 6)
@@ -317,7 +323,7 @@ def main(argv=None) -> int:
     emission = "heuristic" if cand.l2 is None else _refit(games, cand)
     params = {
         "emission": emission,
-        "costs": {"swap": int(best["swap"]), "dead": int(best["dead"]), "live": int(best["live"])},
+        "costs": {"swap": _num(best["swap"]), "dead": _num(best["dead"]), "live": _num(best["live"])},
         "use_tags": True,
         "meta": {
             "source": "LOGO on Metrica sample games 1-3",
@@ -325,8 +331,8 @@ def main(argv=None) -> int:
             "seed": SEED,
             "selected": {
                 "candidate": cand.name,
-                "costs": {"swap": int(best["swap"]), "dead": int(best["dead"]),
-                          "live": int(best["live"])},
+                "costs": {"swap": _num(best["swap"]), "dead": _num(best["dead"]),
+                          "live": _num(best["live"])},
                 "spell_f1_mean": round(float(best["spell_f1_mean"]), 6),
                 "macro_f1_mean": round(float(best["macro_f1_mean"]), 6),
             },

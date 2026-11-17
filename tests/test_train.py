@@ -112,6 +112,20 @@ def _synthetic_game(seed: int):
     return trk, labels
 
 
+def test_cost_grid_brackets_the_optimum_in_ascending_order():
+    swaps = sorted({s for s, _, _ in train.COST_GRID})
+    assert swaps == [2.5, 5, 10, 20, 40, 80, 160]
+    assert sorted({d for _, d, _ in train.COST_GRID}) == [2.5, 5, 10, 20, 40]
+    assert sorted({v for _, _, v in train.COST_GRID}) == [2.5, 5, 10, 20, 40]
+    assert len(train.COST_GRID) == 7 * 5 * 5
+    assert train.COST_GRID == sorted(train.COST_GRID)  # grid order is the final tie-break
+
+
+def test_num_keeps_fractional_costs():
+    assert train._num(2.5) == 2.5
+    assert train._num(10.0) == 10 and isinstance(train._num(10.0), int)
+
+
 def test_logo_runs_on_tiny_synthetic_games(monkeypatch):
     monkeypatch.setattr(train, "COST_GRID", [(20.0, 10.0, 10.0), (40.0, 5.0, 5.0)])
     games = [_synthetic_game(k) for k in range(3)]
