@@ -25,7 +25,7 @@ import pandas as pd
 from montreal import paths
 from montreal.decode import cost_matrix, decode_periods
 from montreal.emission import SoftmaxRegression, heuristic_logp
-from montreal.features import FEATURE_NAMES, compute_features
+from montreal.features import FEATURE_NAMES, FEATURE_SETS, compute_features
 from montreal.metrics import score
 from montreal.tracking import Tracking
 
@@ -54,7 +54,7 @@ class Candidate:
 
 CANDIDATES: list[Candidate] = [Candidate("heuristic")] + [
     Candidate(f"softmax(l2={l2:g},cw={cw or 'none'})", l2, cw)
-    for l2 in (1e-3, 1e-1)
+    for l2 in (1e-3, 1e-2, 1e-1, 1.0, 10.0)
     for cw in (None, "balanced")
 ]
 
@@ -175,8 +175,19 @@ def _train_rows(F: np.ndarray, labels: np.ndarray):
 # --------------------------------------------------------------------------------------
 
 
-def _fold(g: int, games, use_cache: bool) -> list[dict]:
-    """Held-out game g (1-based): returns one row per (candidate, grid point)."""
+def _columns(names) -> list[int]:
+    """Column indices in the full feature matrix of the feature names a model uses."""
+    return [FEATURE_NAMES.index(n) for n in names]
+
+
+def _fold(g: int, games, use_cache: bool, names=None) -> list[dict]:
+    """Held-out game g (1-based): returns one row per (candidate, grid point).
+
+    `names` is the feature subset the models see (default: all of FEATURE_NAMES); the full matrix
+    is what is cached, the subset is cut out by name.
+    """
+    names = list(FEATURE_NAMES if names is None else names)
+    cols = _columns(names)
     held = g - 1
     rng = np.random.default_rng([SEED, g])
     Xs, ys = [], []
@@ -185,21 +196,21 @@ def _fold(g: int, games, use_cache: bool) -> list[dict]:
             continue
         copy = simulate_dropout(trk, rng)  # always drawn, so the stream never depends on the cache
         F = _features(copy, f"montreal_sample_g{j + 1}_drop_{_seed_tag(g)}", use_cache)
-        X, y = _train_rows(F, labels)
+        X, y = _train_rows(F[:, cols], labels)
         Xs.append(X)
         ys.append(y)
     X, y = np.vstack(Xs), np.concatenate(ys)
 
     trk, gt = games[held]
-    F_eval = _dropout_features(trk, g, (100 + g,), use_cache, np.random.default_rng([SEED, 100 + g]))
+    F_eval = _dropout_features(trk, g, (100 + g,), use_cache, np.random.default_rng([SEED, 100 + g]))[:, cols]
     periods = trk.periods
 
     rows = []
     for cand in CANDIDATES:
         if cand.l2 is None:
-            logp = heuristic_logp(F_eval, FEATURE_NAMES)
+            logp = heuristic_logp(F_eval, names)
         else:
-            logp = cand.make().fit(X, y, feature_names=FEATURE_NAMES).log_proba(F_eval)
+            logp = cand.make().fit(X, y, feature_names=names).log_proba(F_eval)
         for swap, dead, live in COST_GRID:
             pred = decode_periods(logp, periods, cost_matrix(swap, dead, live))
             r = score(gt, pred)
@@ -208,7 +219,7 @@ def _fold(g: int, games, use_cache: bool) -> list[dict]:
     return rows
 
 
-def logo(games, cache: bool = False, workers: int = 1) -> pd.DataFrame:
+def logo(games, cache: bool = False, workers: int = 1, feature_names=None) -> pd.DataFrame:
     """Leave-one-game-out table. `games` is a list of (Tracking, label codes) for games 1..N.
 
     One row per (candidate, swap, dead, live), columns ``spell_f1_g<k>`` / ``macro_f1_g<k>`` for
@@ -221,9 +232,10 @@ def logo(games, cache: bool = False, workers: int = 1) -> pd.DataFrame:
         from concurrent.futures import ProcessPoolExecutor
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(_fold, folds, [games] * len(folds), [cache] * len(folds)))
+            results = list(pool.map(_fold, folds, [games] * len(folds), [cache] * len(folds),
+                                    [feature_names] * len(folds)))
     else:
-        results = [_fold(g, games, cache) for g in folds]
+        results = [_fold(g, games, cache, feature_names) for g in folds]
 
     base = [(c.name, *pt) for c in CANDIDATES for pt in COST_GRID]
     table = pd.DataFrame(base, columns=["candidate", "swap", "dead", "live"])
@@ -277,16 +289,29 @@ def _fmt(table: pd.DataFrame) -> str:
     return table[cols].to_string(index=False, float_format=lambda v: f"{v:.4f}")
 
 
-def _refit(games, cand: Candidate) -> dict:
+def choose_feature_set(tables: dict[str, pd.DataFrame]) -> tuple[str, str]:
+    """('v1' | 'v2', decision text). v2 is kept only if its best spell_f1_mean is strictly higher."""
+    b1, b2 = select(tables["v1"]), select(tables["v2"])
+    s1, s2 = float(b1["spell_f1_mean"]), float(b2["spell_f1_mean"])
+    keep = "v2" if s2 > s1 else "v1"
+    verb = "higher than" if s2 > s1 else "not higher than"
+    text = (f"features {keep} selected: best v2 spell_f1_mean {s2:.4f} is {verb} best v1 {s1:.4f} "
+            f"(v1: {b1['candidate']} {_num(b1['swap'])}/{_num(b1['dead'])}/{_num(b1['live'])}; "
+            f"v2: {b2['candidate']} {_num(b2['swap'])}/{_num(b2['dead'])}/{_num(b2['live'])})")
+    return keep, text
+
+
+def _refit(games, cand: Candidate, names) -> dict:
     """Softmax winner refit on all games' dropout copies (per-game seed [SEED, 200 + k])."""
+    cols = _columns(names)
     Xs, ys = [], []
     for k, (trk, labels) in enumerate(games, start=1):
         copy = simulate_dropout(trk, np.random.default_rng([SEED, 200 + k]))
         F = _features(copy, f"montreal_sample_g{k}_drop_{_seed_tag(200 + k)}", True)
-        X, y = _train_rows(F, labels)
+        X, y = _train_rows(F[:, cols], labels)
         Xs.append(X)
         ys.append(y)
-    model = cand.make().fit(np.vstack(Xs), np.concatenate(ys), feature_names=FEATURE_NAMES)
+    model = cand.make().fit(np.vstack(Xs), np.concatenate(ys), feature_names=list(names))
     return model.to_dict()
 
 
@@ -297,6 +322,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m montreal.train", description=__doc__)
     ap.add_argument("--params", default=str(repo / "models" / "params.json"))
     ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--feature-set", choices=["both", "v1", "v2"], default="both",
+                    help="both: run LOGO for v1 (41 features) and v1+v2 (51) and keep v2 only if "
+                         "its best spell_f1_mean is higher; v1 / v2: force one set")
     args = ap.parse_args(argv)
 
     t0 = time.perf_counter()
@@ -310,36 +338,54 @@ def main(argv=None) -> int:
         print(f"game {k}: rows={len(labels)} label shares H/A/D/X={share}")
     t_load = time.perf_counter() - t0
 
-    t1 = time.perf_counter()
-    table = logo(games, cache=True, workers=args.workers)
-    t_logo = time.perf_counter() - t1
-    n_eval = len(table) * len(games)
-    print(f"LOGO: {len(table)} rows x {len(games)} folds = {n_eval} decode+score evaluations "
-          f"in {t_logo:.1f} s ({t_logo / n_eval:.3f} s each, incl. fits)")
+    sets = ["v1", "v2"] if args.feature_set == "both" else [args.feature_set]
+    tables: dict[str, pd.DataFrame] = {}
+    for fs in sets:
+        t1 = time.perf_counter()
+        tables[fs] = table = logo(games, cache=True, workers=args.workers,
+                                  feature_names=FEATURE_SETS[fs])
+        t_logo = time.perf_counter() - t1
+        n_eval = len(table) * len(games)
+        print(f"\n=== features {fs} ({len(FEATURE_SETS[fs])} columns) ===")
+        print(f"LOGO: {len(table)} rows x {len(games)} folds = {n_eval} decode+score evaluations "
+              f"in {t_logo:.1f} s ({t_logo / n_eval:.3f} s each, incl. fits)")
+        print(f"Top 5 (LOGO, features {fs}, sorted by spell_f1_mean):")
+        print(_fmt(ranked(table).head(5)))
+        heur = table[table["candidate"] == "heuristic"]
+        print(f"Heuristic best (features {fs}):")
+        print(_fmt(heur.loc[[select(heur).name]]))
 
+    if len(sets) == 2:
+        chosen, decision = choose_feature_set(tables)
+    else:
+        chosen, decision = sets[0], f"features {sets[0]} forced by --feature-set"
+    print(f"\ndecision: {decision}")
+
+    table = tables[chosen]
     top = ranked(table)
-    print("\nTop 10 (LOGO, sorted by spell_f1_mean):")
-    print(_fmt(top.head(10)))
-    heur = table[table["candidate"] == "heuristic"]
-    heur_best = select(heur)
-    print("\nHeuristic best:")
-    print(_fmt(heur.loc[[heur_best.name]]))
-
+    heur_best = select(table[table["candidate"] == "heuristic"])
     best = select(table)
     cand = next(c for c in CANDIDATES if c.name == best["candidate"])
-    emission = "heuristic" if cand.l2 is None else _refit(games, cand)
+    names = list(FEATURE_SETS[chosen])
+    emission = "heuristic" if cand.l2 is None else _refit(games, cand, names)
+    costs = {"swap": _num(best["swap"]), "dead": _num(best["dead"]), "live": _num(best["live"])}
     params = {
         "emission": emission,
-        "costs": {"swap": _num(best["swap"]), "dead": _num(best["dead"]), "live": _num(best["live"])},
+        "costs": costs,
         "use_tags": True,
         "meta": {
             "source": "LOGO on Metrica sample games 1-3",
             "sample_commit": paths.SAMPLE_COMMIT,
             "seed": SEED,
+            "feature_set": chosen,
+            "n_features": len(names),
+            "decision": decision,
+            "logo_best": {fs: _row_dict(select(tables[fs])) for fs in sets},
+            "top5_by_feature_set": {fs: [_row_dict(r) for _, r in ranked(tables[fs]).head(5).iterrows()]
+                                    for fs in sets},
             "selected": {
                 "candidate": cand.name,
-                "costs": {"swap": _num(best["swap"]), "dead": _num(best["dead"]),
-                          "live": _num(best["live"])},
+                "costs": dict(costs),
                 "spell_f1_mean": round(float(best["spell_f1_mean"]), 6),
                 "macro_f1_mean": round(float(best["macro_f1_mean"]), 6),
             },
@@ -350,14 +396,12 @@ def main(argv=None) -> int:
     out = Path(args.params)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(params, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"\nselected: {cand.name} swap={params['costs']['swap']} dead={params['costs']['dead']} "
-          f"live={params['costs']['live']} spell_f1_mean={best['spell_f1_mean']:.4f} "
+    print(f"selected: {cand.name} features={chosen} swap={costs['swap']} dead={costs['dead']} "
+          f"live={costs['live']} spell_f1_mean={best['spell_f1_mean']:.4f} "
           f"macro_f1_mean={best['macro_f1_mean']:.4f}")
     print(f"wrote: {out}")
-    print(f"runtime: load+features {t_load:.1f} s, LOGO {t_logo:.1f} s, "
-          f"total {time.perf_counter() - t0:.1f} s")
+    print(f"runtime: load+features {t_load:.1f} s, total {time.perf_counter() - t0:.1f} s")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

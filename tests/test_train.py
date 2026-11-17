@@ -147,3 +147,38 @@ def test_feature_cache_signature_depends_on_code_version(monkeypatch):
     assert sig == train._signature(trk)
     monkeypatch.setattr(train, "_code_version", lambda: "another version of features.py")
     assert train._signature(trk) != sig
+
+def test_candidate_grid_order_heuristic_first_then_l2_ascending_none_before_balanced():
+    names = [c.name for c in train.CANDIDATES]
+    assert names[0] == "heuristic"
+    l2s = (1e-3, 1e-2, 1e-1, 1, 10)
+    expected = [f"softmax(l2={l2:g},cw={cw})" for l2 in l2s for cw in ("none", "balanced")]
+    assert names[1:] == expected
+    assert [c.class_weight for c in train.CANDIDATES[1:3]] == [None, "balanced"]
+
+
+def test_logo_feature_names_select_the_columns_a_model_sees(monkeypatch):
+    monkeypatch.setattr(train, "COST_GRID", [(20.0, 10.0, 10.0)])
+    monkeypatch.setattr(train, "CANDIDATES", train.CANDIDATES[:3])  # heuristic + 2 softmax
+    games = [_synthetic_game(k) for k in range(3)]
+    t_all = train.logo(games)
+    t_v1 = train.logo(games, feature_names=train.FEATURE_SETS["v1"])
+    assert list(t_all["candidate"]) == list(t_v1["candidate"])
+    # the heuristic reads v1 columns only, so the feature set cannot change it
+    pd.testing.assert_frame_equal(t_all.iloc[[0]].reset_index(drop=True),
+                                  t_v1.iloc[[0]].reset_index(drop=True))
+    assert np.isfinite(t_v1[["spell_f1_mean", "macro_f1_mean"]].to_numpy()).all()
+    pd.testing.assert_frame_equal(t_v1, train.logo(games, feature_names=train.FEATURE_SETS["v1"]))
+
+
+def _best(spell, macro=0.5, name="softmax(l2=0.1,cw=none)"):
+    return pd.DataFrame({"candidate": [name], "swap": [10], "dead": [10], "live": [10],
+                         "spell_f1_mean": [spell], "macro_f1_mean": [macro]})
+
+
+def test_choose_feature_set_keeps_v2_only_if_strictly_better():
+    assert train.choose_feature_set({"v1": _best(0.45), "v2": _best(0.46)})[0] == "v2"
+    assert train.choose_feature_set({"v1": _best(0.45), "v2": _best(0.45)})[0] == "v1"  # tie -> v1
+    assert train.choose_feature_set({"v1": _best(0.45), "v2": _best(0.40)})[0] == "v1"
+    name, text = train.choose_feature_set({"v1": _best(0.45), "v2": _best(0.46)})
+    assert "v2" in text and "0.4600" in text and "0.4500" in text

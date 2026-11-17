@@ -71,17 +71,40 @@ WINDOW_SOURCES = [
     "ball_vis",
 ]
 WINDOWS = (12, 50)
-FEATURE_NAMES: list[str] = (
+V1_NAMES: list[str] = (
     BASE_NAMES
     + CARRY_NAMES
     + [f"{name}_w{w}" for name in WINDOW_SOURCES for w in WINDOWS]
 )
+# Features v2 (appended after the 41 v1 columns, which keep their names and order):
+V2_BASE_NAMES = [
+    "near_run_home",  # seconds the home team has been nearest to the visible ball (0..10)
+    "near_run_away",
+    "gap_flip",  # ball missing and the nearest team differs before and after the gap
+    "ball_still",  # ball visible and slower than 0.5 m/s
+    "restart_spot",  # ball visible on a corner arc, touchline, goal line, centre spot, goal area
+    "ply_accel",  # mean ply_speed over the next 50 rows minus the previous 50 rows
+]
+V2_WINDOWS = [("ball_still", 50), ("restart_spot", 50), ("near_run_home", 12), ("near_run_away", 12)]
+V2_NAMES: list[str] = V2_BASE_NAMES + [f"{name}_w{w}" for name, w in V2_WINDOWS]
+FEATURE_NAMES: list[str] = V1_NAMES + V2_NAMES
+FEATURE_SETS: dict[str, list[str]] = {"v1": V1_NAMES, "v2": FEATURE_NAMES}
 _COL = {name: i for i, name in enumerate(FEATURE_NAMES)}
 
 MAX_DIST = 30.0
 NEAR_M = 3.0
 SLOW_MPS = 1.0
 SEEN_CAP_S = 30.0
+NEAR_RUN_CAP_S = 10.0
+FLIP_MIN_DIFF = 2.0  # m, both sides of a gap
+STILL_MPS = 0.5
+CORNER_M = 2.0
+LINE_M = 1.5
+CENTRE_M = 2.0
+GOAL_AREA_DEPTH = 5.5
+GOAL_AREA_WIDTH = 18.32
+ACCEL_ROWS = 50
+ACCEL_CAP = 6.0
 
 
 def _gap_diff(X: np.ndarray, half: int) -> tuple[np.ndarray, np.ndarray]:
@@ -227,6 +250,59 @@ def _period_features(
     for w in WINDOWS:
         wm = _centered_mean(src, w)
         for j, name in enumerate(WINDOW_SOURCES):
+            col[f"{name}_w{w}"] = wm[:, j]
+
+    # ---- v2: who has been nearest for how long, ball changed hands in a gap, restarts ---------
+    def run_seconds(cond: np.ndarray) -> np.ndarray:
+        """Rows (incl. the current) since `cond` last was False, in seconds; 0 where it is False."""
+        last_false = np.maximum.accumulate(np.where(~cond, idx, -1))
+        return np.where(cond, (idx - last_false) / fps, 0.0)
+
+    dd = col["d_diff"]
+    col["near_run_home"] = np.clip(run_seconds(vis & (dd > 0)), 0.0, NEAR_RUN_CAP_S)
+    col["near_run_away"] = np.clip(run_seconds(vis & (dd < 0)), 0.0, NEAR_RUN_CAP_S)
+
+    ld, nd = col["last_diff"], col["next_diff"]
+    col["gap_flip"] = (
+        (~vis) & (ld * nd < 0) & (np.abs(ld) >= FLIP_MIN_DIFF) & (np.abs(nd) >= FLIP_MIN_DIFF)
+    ).astype(np.float64)
+
+    col["ball_still"] = (vis & np.isfinite(bs) & (bs < STILL_MPS)).astype(np.float64)
+
+    def to_horizontal_line(y0: float) -> np.ndarray:  # touchline y = y0, x in [0, L]
+        dx = np.maximum(np.maximum(-bx, bx - L), 0.0)
+        return np.hypot(dx, by - y0)
+
+    def to_vertical_line(x0: float) -> np.ndarray:  # goal line x = x0, y in [0, W]
+        dy = np.maximum(np.maximum(-by, by - W), 0.0)
+        return np.hypot(bx - x0, dy)
+
+    near_line = np.minimum.reduce(
+        [to_horizontal_line(0.0), to_horizontal_line(W), to_vertical_line(0.0), to_vertical_line(L)]
+    ) <= LINE_M
+    corner = np.minimum.reduce(
+        [np.hypot(bx - cx_, by - cy_) for cx_ in (0.0, L) for cy_ in (0.0, W)]
+    ) <= CORNER_M
+    centre = np.hypot(bx - L / 2.0, by - W / 2.0) <= CENTRE_M
+    goal_area = (
+        (((bx >= 0.0) & (bx <= GOAL_AREA_DEPTH)) | ((bx <= L) & (bx >= L - GOAL_AREA_DEPTH)))
+        & (np.abs(by - W / 2.0) <= GOAL_AREA_WIDTH / 2.0)
+    )
+    col["restart_spot"] = (vis & (near_line | corner | centre | goal_area)).astype(np.float64)
+
+    csum = np.concatenate([[0.0], np.cumsum(col["ply_speed"])])
+    lo_b, hi_b = np.clip(idx - ACCEL_ROWS, 0, m), idx  # rows [t - 50, t)
+    lo_a, hi_a = np.minimum(idx + 1, m), np.clip(idx + 1 + ACCEL_ROWS, 0, m)  # rows [t + 1, t + 51)
+    n_b, n_a = hi_b - lo_b, hi_a - lo_a
+    ahead = (csum[hi_a] - csum[lo_a]) / np.maximum(n_a, 1)
+    behind = (csum[hi_b] - csum[lo_b]) / np.maximum(n_b, 1)
+    col["ply_accel"] = np.clip(np.where((n_a > 0) & (n_b > 0), ahead - behind, 0.0),
+                               -ACCEL_CAP, ACCEL_CAP)
+
+    for w in sorted({w for _, w in V2_WINDOWS}):
+        names = [name for name, ww in V2_WINDOWS if ww == w]
+        wm = _centered_mean(np.stack([col[name] for name in names], axis=1), w)
+        for j, name in enumerate(names):
             col[f"{name}_w{w}"] = wm[:, j]
 
     return np.stack([col[name] for name in FEATURE_NAMES], axis=1)

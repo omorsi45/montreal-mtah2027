@@ -10,7 +10,7 @@ import pytest
 
 from montreal import paths
 from montreal.emission import SoftmaxRegression
-from montreal.features import FEATURE_NAMES, compute_features
+from montreal.features import FEATURE_NAMES, V1_NAMES, compute_features
 from montreal.pipeline import (emission_logp, predict_codes, predict_match, write_submission)
 from montreal.tracking import Tracking
 
@@ -118,15 +118,33 @@ def test_emission_logp_softmax_dict_and_name_check():
     model = SoftmaxRegression().fit(F, y, feature_names=FEATURE_NAMES)
     params = dict(HEURISTIC, emission=model.to_dict())
     assert np.allclose(emission_logp(F, params), model.log_proba(F))
-    bad = model.to_dict()
-    bad["feature_names"] = list(reversed(FEATURE_NAMES))
-    with pytest.raises(ValueError):
-        emission_logp(F, dict(HEURISTIC, emission=bad))
     none = model.to_dict()
     none["feature_names"] = None
     with pytest.raises(ValueError):
         emission_logp(F, dict(HEURISTIC, emission=none))
+    missing = model.to_dict()
+    missing["feature_names"] = FEATURE_NAMES[:-1] + ["not_a_feature"]
+    with pytest.raises(ValueError, match="not_a_feature"):
+        emission_logp(F, dict(HEURISTIC, emission=missing))
+    with pytest.raises(ValueError):  # the full matrix is required
+        emission_logp(F[:, :41], params)
 
+
+def test_emission_logp_selects_the_stored_columns_by_name():
+    rng = np.random.default_rng(1)
+    F = rng.normal(size=(80, len(FEATURE_NAMES)))
+    y = rng.integers(0, 3, 80)
+    # a v1 model (first 41 columns) applied to the full v1+v2 matrix
+    v1 = SoftmaxRegression().fit(F[:, :41], y, feature_names=FEATURE_NAMES[:41])
+    np.testing.assert_allclose(emission_logp(F, dict(HEURISTIC, emission=v1.to_dict())),
+                               v1.log_proba(F[:, :41]))
+    # any column order works, because the names decide
+    perm = rng.permutation(len(FEATURE_NAMES))
+    shuffled = SoftmaxRegression().fit(F[:, perm], y, feature_names=[FEATURE_NAMES[i] for i in perm])
+    np.testing.assert_allclose(emission_logp(F, dict(HEURISTIC, emission=shuffled.to_dict())),
+                               shuffled.log_proba(F[:, perm]))
+    # the heuristic reads its columns by name from the full matrix too
+    assert emission_logp(F, HEURISTIC).shape == (80, 3)
 
 @pytest.mark.slow
 def test_run_twice_identical():
@@ -150,7 +168,9 @@ def test_committed_params_load_through_emission_logp_and_match_feature_names():
     from montreal.pipeline import load_params
     params = load_params(paths.repo_dir() / "models" / "params.json")
     assert isinstance(params["emission"], dict)
-    assert params["emission"]["feature_names"] == FEATURE_NAMES
+    names = params["emission"]["feature_names"]
+    assert names == FEATURE_NAMES[:len(names)]  # v1 (first 41) or v1+v2: a stored prefix, by name
+    assert len(names) in (len(V1_NAMES), len(FEATURE_NAMES))
     F = np.random.default_rng(5).normal(size=(40, len(FEATURE_NAMES)))
     logp = emission_logp(F, params)
     assert logp.shape == (40, 3) and np.isfinite(logp).all()

@@ -34,9 +34,16 @@ def emission_logp(F: np.ndarray, params: dict) -> np.ndarray:
             raise ValueError(f"unknown emission {emission!r}")
         return heuristic_logp(F, FEATURE_NAMES)
     model = SoftmaxRegression.from_dict(emission)
-    if model.feature_names is None or list(model.feature_names) != list(FEATURE_NAMES):
-        raise ValueError("emission model feature names do not match FEATURE_NAMES")
-    return model.log_proba(F)
+    if model.feature_names is None:
+        raise ValueError("emission model has no stored feature names")
+    missing = [name for name in model.feature_names if name not in FEATURE_NAMES]
+    if missing:
+        raise ValueError(f"emission model needs features that are not computed: {missing}")
+    if np.shape(F)[1] != len(FEATURE_NAMES):
+        raise ValueError(f"F must have {len(FEATURE_NAMES)} columns (FEATURE_NAMES), got {np.shape(F)[1]}")
+    # The model sees exactly the columns it was trained on, picked by name from the full matrix.
+    cols = [FEATURE_NAMES.index(name) for name in model.feature_names]
+    return model.log_proba(np.asarray(F)[:, cols])
 
 
 def predict_codes(trk: Tracking, F: np.ndarray, params: dict, tags: dict | None = None) -> np.ndarray:
