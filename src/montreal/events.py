@@ -123,7 +123,8 @@ def derive_labels(events: pd.DataFrame, n: int, periods: list[tuple[int, int]]) 
 
     Per period: starts dead; BALL OUT / FAULT RECEIVED (at start) and SHOT ...GOAL / ...-OUT (at
     max(start, end)) make the ball dead; the first SET PIECE/PASS/CARRY/SHOT/RECOVERY while dead
-    restarts play for that team; while alive, the first PASS/CARRY/SHOT/SET PIECE/RECOVERY by the
+    restarts play for that team (strictly after the dead trigger's own frame); while alive, the
+    first PASS/CARRY/SHOT/SET PIECE/RECOVERY by the
     other team hands possession over. Everything outside the periods is X.
     """
     labels = np.full(n, X, dtype=np.int8)
@@ -161,15 +162,20 @@ def derive_labels(events: pd.DataFrame, n: int, periods: list[tuple[int, int]]) 
 
         state = D
         last = p_start
+        trigger = -1  # frame of the dead trigger that started the current D run (-1: period start)
         for time, _, kind, t in actions:
             time = min(max(time, last), p_stop)
             if kind == 1:
                 new = D
+            elif state == D and time <= trigger:
+                new = D  # an event at the trigger frame never restarts play
             else:
                 code = H if t == "H" else A
                 # dead -> alive for t; alive -> switch only if the other team acts
                 new = code if state == D or code != state else state
             if new != state:
+                if new == D:
+                    trigger = time
                 labels[last:time] = state
                 last = time
                 state = new

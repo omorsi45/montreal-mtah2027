@@ -72,6 +72,19 @@ def test_ball_out_until_restart():
     assert (labels[40:50] == A).all()
 
 
+def test_same_frame_carry_does_not_restart():
+    # an event at the dead trigger's own frame never restarts play (Ruling R6)
+    ev = _ev(
+        ("H", "PASS", 0),
+        ("H", "BALL OUT", 30),
+        ("A", "CARRY", 30),  # listed after the BALL OUT, same frame
+        ("A", "SET PIECE", 40),
+    )
+    labels = derive_labels(ev, N, PERIODS)
+    assert (labels[30:40] == D).all()
+    assert (labels[40:50] == A).all()
+
+
 def test_fault_received_is_dead():
     ev = _ev(("H", "PASS", 0), ("A", "FAULT RECEIVED", 20), ("A", "SET PIECE", 25))
     labels = derive_labels(ev, N, PERIODS)
