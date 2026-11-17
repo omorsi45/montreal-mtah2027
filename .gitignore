@@ -9,3 +9,7 @@ __pycache__/
 .pytest_cache/
 docs/*.pdf
 docs/*.html
+
+# local working notes, not part of the submission
+docs/superpowers/specs/2026-11-17-possession-pipeline-design.md
+docs/superpowers/plans/2026-11-17-possession-pipeline.md
